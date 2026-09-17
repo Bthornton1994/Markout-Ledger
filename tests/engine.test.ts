@@ -123,7 +123,7 @@ describe('outcomes are unavailable until their measurement horizon has elapsed',
     expect(w1.outcomes.pendingAtWindowEnd).toBe(0);
 
     const outcomes = r.ledger.ofType('outcome');
-    expect(outcomes.map((o) => [o.horizonMs, o.availableAt - o.fillMarketTime, o.simTime === o.availableAt])).toEqual([
+    expect(outcomes.map((o) => [o.horizonMs, o.availableAt - o.sourceMarketTime, o.simTime === o.availableAt])).toEqual([
       [1000, 1000, true],
       [3000, 3000, true],
     ]);
@@ -452,7 +452,7 @@ describe('venue-time fill eligibility inside the replay', () => {
     const r = await replay({ fixture: fx, policy, controller: null, config: testConfig({ steering: 'disabled' }) });
 
     const fills = r.ledger.ofType('fill');
-    expect(fills.map((f) => [f.simTime - T0, f.tradeMarketTime - T0, f.qty, f.afterCancelEffective])).toEqual([
+    expect(fills.map((f) => [f.simTime - T0, f.sourceMarketTime - T0, f.qty, f.afterCancelEffective])).toEqual([
       [100, 60, '0.300000', false],
       [1040, 940, '0.200000', true],
     ]);
@@ -475,11 +475,11 @@ describe('venue-time fill eligibility inside the replay', () => {
 
     // outcomes run on venue time and cannot precede the observation of the fill
     const outcomes = r.ledger.ofType('outcome').filter((o) => o.horizonMs === 1000);
-    expect(outcomes.map((o) => [o.fillMarketTime - T0, o.fillObservedAt - T0, o.availableAt - T0, o.midSelection])).toEqual([
+    expect(outcomes.map((o) => [o.sourceMarketTime - T0, o.observedAt - T0, o.availableAt - T0, o.midSelection])).toEqual([
       [60, 100, 1060, 'venue_time'],
       [940, 1040, 1940, 'venue_time'],
     ]);
-    expect(outcomes.every((o) => o.midMarketTime! <= o.fillMarketTime + o.horizonMs)).toBe(true);
+    expect(outcomes.every((o) => o.midMarketTime! <= o.sourceMarketTime + o.horizonMs)).toBe(true);
 
     // accounting identity still holds with late fills
     const p = r.summary.portfolio;

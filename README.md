@@ -84,6 +84,7 @@ Each of these is a test in `tests/` that exercises the public interfaces rather 
 - a book touch alone never creates a fill; a print at our price fills only past the displayed queue; a fill never exceeds the print
 - fill eligibility is decided on venue time: a trade printed before an order was live cannot fill it even if observed afterwards; a trade printed while live but observed after the cancel took effect is a late fill
 - prints observed out of venue order are matched in venue order within a bounded window (the audit's Case B awards 0.300, not 1.000); awards only ever grow, so decisions stay causal
+- every booked quantity cites its actual source print and venue time, never beyond that print's size, and becomes known only when the print that establishes it is observed; a later-observed earlier print that re-splits booked quantity moves provenance (and pending outcome horizons) without touching accounting
 - a stale-discarded print that was eligible for a resting order is recorded as order-linked uncertainty, never awarded; zero order and cancel latency replay cleanly
 - the cancel/fill race is resolved consistently on venue time (fill wins at equal timestamps) and every order reaches exactly one terminal state
 - the ledger is chronological: a malformed or out-of-order event later in the stream is rejected when encountered and leaves no trace in the earlier ledger prefix

@@ -62,7 +62,7 @@ describe('Case B: prints arriving out of venue order', () => {
     );
     const r = await replay({ fixture: fx, policy: fixedQuotePolicy({ bid: '99.90', qty: '1' }), controller: null, config: testConfig({ steering: 'disabled' }) });
     const fills = r.ledger.ofType('fill');
-    expect(fills.map((f) => [f.simTime - T0, f.tradeMarketTime - T0, f.qty])).toEqual([[250, 200, '0.300000']]);
+    expect(fills.map((f) => [f.simTime - T0, f.sourceMarketTime - T0, f.qty])).toEqual([[250, 200, '0.300000']]);
     expect(r.summary.fills.qty).toBe('0.300000');
     // X is recorded as absorbed by the queue in venue order, not as a fill
     expect(r.ledger.ofType('queue_consumed').map((q) => q.simTime - T0)).toEqual([300]);
@@ -82,12 +82,38 @@ describe('Case B: prints arriving out of venue order', () => {
     h.feed(print(300, 100, '99.85', '0.5')); // through, but printed BEFORE the at-price print
     h.run();
     const fills = h.fills();
-    // venue order: through at 100 fills 0.5 and zeroes the queue; at-price at 200 then fills the remaining 0.5
-    expect(fills.map((f) => [f.at - T0, f.qty, f.fillType, f.venueOrderContribution, f.reorderAdjustmentQty])).toEqual([
-      [300, parseQty('1'), 'trade_through', parseQty('0.5'), parseQty('0.5')],
+    // venue order: through at 100 fills 0.5 and zeroes the queue; at-price at 200 then fills the remaining 0.5.
+    // Both are booked when the through print is observed, each citing its own source print and venue time.
+    expect(fills.map((f) => [f.at - T0, f.sourceTrade.marketTime - T0, f.qty, f.fillType, f.establishedBy.marketTime - T0])).toEqual([
+      [300, 100, parseQty('0.5'), 'trade_through', 100],
+      [300, 200, parseQty('0.5'), 'queue_exhausted', 100],
     ]);
+    for (const f of fills) expect(f.qty <= f.sourceTrade.size).toBe(true);
     expect(h.kinds().filter((k) => k === 'queue_consumed')).toHaveLength(1); // the at-price print, when it was observed
     expect(h.ex.get('o1')!.state).toBe('filled');
+    expect([...h.ex.get('o1')!.awardedBySource.values()].map((a) => [a.trade.marketTime - T0, a.qty])).toEqual([
+      [100, parseQty('0.5')],
+      [200, parseQty('0.5')],
+    ]);
+  });
+
+  it('a late-observed earlier through print re-splits already-booked quantity: provenance moves, accounting does not', () => {
+    const h = exchange('0');
+    h.at(20, () => {
+      h.ex.submit({ clientId: 'c', side: 'buy', price: parsePrice('99.90'), qty: parseQty('1') }, T0 + 20); // live at 70
+    });
+    h.feed(print(250, 200, '99.85', '1.0')); // B: through, fills the whole order when observed
+    h.feed(print(300, 100, '99.85', '0.5')); // A: through, printed before B: in venue order A fills 0.5 and B only 0.5
+    h.run();
+    expect(h.fills().map((f) => [f.at - T0, f.sourceTrade.marketTime - T0, f.qty])).toEqual([[250, 200, parseQty('1')]]);
+    const re = h.events.filter((e): e is Extract<ExecutionEvent, { kind: 'fill_reattributed' }> => e.kind === 'fill_reattributed');
+    expect(re.map((r) => [r.at - T0, r.fromTrade.marketTime - T0, r.toTrade.marketTime - T0, r.qty])).toEqual([[300, 200, 100, parseQty('0.5')]]);
+    const o = h.ex.get('o1')!;
+    expect(o.filledQty).toBe(parseQty('1'));
+    expect([...o.awardedBySource.values()].map((a) => [a.trade.marketTime - T0, a.qty])).toEqual([
+      [200, parseQty('0.5')],
+      [100, parseQty('0.5')],
+    ]);
   });
 
   it('a late earlier print shifts a shared print between our own orders without over-awarding', () => {

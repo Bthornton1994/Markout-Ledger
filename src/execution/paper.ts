@@ -21,6 +21,14 @@
  *   window moves past a print (marketTime < now - maxTradeLagMs) no later-observed print can precede it
  *   (it would exceed the lag bound), so the prefix is folded into the orders' checkpoints and is final.
  *
+ * PROVENANCE
+ *   Quantity is booked per SOURCE print: the print that fills the order in venue order. Each fill event
+ *   names its source print (whose size bounds it) and venue time, and the print whose observation
+ *   established it (`establishedBy`, which may be a different, later-observed earlier print). When a
+ *   later-observed earlier print changes how already-booked quantity splits across sources, the booking
+ *   is not undone (accounting is unchanged); a `fill_reattributed` event moves the provenance of that
+ *   quantity to its actual source print so the ledger always carries the venue-order attribution.
+ *
  *   The engine discards observations lagging more than the same bound (stale). A discarded print that
  *   was eligible for one of our orders is reported through `noteDiscardedTrade` as `fill_uncertain`:
  *   the data cannot establish whether it filled us, so nothing is awarded and the doubt is recorded.
@@ -150,11 +158,13 @@ export interface PaperOrder {
   /** Matching checkpoint: queue and filled quantity after every print with venue time below the side's fold cut. */
   ckptQueueAhead: bigint;
   ckptFilled: bigint;
+  /** Booked quantity per source print (the print that filled us in venue order). Values sum to filledQty. */
+  awardedBySource: Map<string, { trade: TradeEvent; qty: bigint }>;
 }
 
 export type IneligibleReason = 'predates_activation' | 'at_activation_instant' | 'after_cancellation';
 export type RaceOutcome = 'fill_wins_before_cancel' | 'fill_wins_tie' | 'late_fill_after_cancel_effective';
-export type FillType = 'trade_through' | 'queue_exhausted' | 'reordered';
+export type FillType = 'trade_through' | 'queue_exhausted';
 
 export type ExecutionEvent =
   | { kind: 'order_submitted'; order: PaperOrder; cost: bigint; at: number }
@@ -167,19 +177,27 @@ export type ExecutionEvent =
   | {
       kind: 'fill';
       order: PaperOrder;
-      /** The print whose observation established this fill. */
-      trade: TradeEvent;
+      /** The print that filled us in venue order; its size bounds the fill. */
+      sourceTrade: TradeEvent;
+      /** The print whose observation established this fill (equals sourceTrade unless re-ordering released it). */
+      establishedBy: TradeEvent;
       qty: bigint;
       notional: bigint;
       fee: bigint;
       fillType: FillType;
       queueAheadBefore: bigint;
-      /** Quantity the arriving print itself fills in venue order. */
-      venueOrderContribution: bigint;
-      /** qty - venueOrderContribution: quantity released (or absorbed) by re-ordering earlier-observed prints. */
-      reorderAdjustmentQty: bigint;
       duringCancelPending: boolean;
       afterCancelEffective: boolean;
+      at: number;
+    }
+  | {
+      /** Already-booked quantity whose venue-order source changed: provenance moves, accounting does not. */
+      kind: 'fill_reattributed';
+      order: PaperOrder;
+      fromTrade: TradeEvent;
+      toTrade: TradeEvent;
+      qty: bigint;
+      establishedBy: TradeEvent;
       at: number;
     }
   | { kind: 'queue_consumed'; order: PaperOrder; trade: TradeEvent; queueAheadBefore: bigint; queueAheadAfter: bigint; at: number }
@@ -269,6 +287,7 @@ export class PaperExchange {
       finalAt: null,
       ckptQueueAhead: 0n,
       ckptFilled: 0n,
+      awardedBySource: new Map(),
     };
     this.orders.set(order.orderId, order);
     this.emit({ kind: 'order_submitted', order, cost: this.config.placementCost, at: now });
@@ -360,15 +379,16 @@ export class PaperExchange {
       for (const o of inPriority) {
         const st = states.get(o.orderId)!;
         const role = tradeRoles?.get(o.orderId);
-        const delta = st.filled - o.filledQty;
-        if (delta < 0n) {
+        if (st.filled < o.filledQty) {
           throw new Error(`matching invariant broken: venue-ordered total ${st.filled} below awarded ${o.filledQty} for ${o.orderId}`);
         }
         o.queueAhead = st.queueAhead;
-        if (delta > 0n) {
-          this.award(o, trade, delta, role, now);
-        } else if (role && role.kind === 'queue_consumed') {
+        if (role && role.kind === 'queue_consumed') {
           this.emit({ kind: 'queue_consumed', order: o, trade, queueAheadBefore: role.queueBefore, queueAheadAfter: role.queueAfter, at: now });
+        }
+        this.reconcileAttribution(o, matcher.trades, roles, trade, now);
+        if (o.filledQty !== st.filled) {
+          throw new Error(`attribution invariant broken: booked ${o.filledQty} != venue-ordered total ${st.filled} for ${o.orderId}`);
         }
       }
     }
@@ -475,7 +495,44 @@ export class PaperExchange {
     matcher.cut = newCut;
   }
 
-  private award(order: PaperOrder, trade: TradeEvent, qty: bigint, role: Role | undefined, now: number): void {
+  /**
+   * Bring the order's booked per-source attribution in line with the venue-ordered simulation over the
+   * window prints. Prints already folded keep their booked attribution (they can no longer change).
+   * Decreases (a source now fills less than was booked to it) are moved to increasing sources as
+   * `fill_reattributed`; the remaining increases are booked as new fills. Total booked == venue total.
+   */
+  private reconcileAttribution(order: PaperOrder, windowTrades: TradeEvent[], roles: SimResult['roles'], establishedBy: TradeEvent, now: number): void {
+    type Change = { trade: TradeEvent; role: Role | undefined; next: bigint; booked: bigint; amount: bigint };
+    const changes: Change[] = windowTrades.map((t) => {
+      const role = roles.get(t.eventId)?.get(order.orderId);
+      const next = role?.fill ?? 0n;
+      const booked = order.awardedBySource.get(t.eventId)?.qty ?? 0n;
+      return { trade: t, role, next, booked, amount: next - booked };
+    });
+    const decreases = changes.filter((c) => c.amount < 0n).map((c) => ({ ...c, amount: -c.amount }));
+    const increases = changes.filter((c) => c.amount > 0n);
+    for (const dec of decreases) {
+      let remaining = dec.amount;
+      for (const inc of increases) {
+        if (remaining === 0n) break;
+        const take = minBig(inc.amount, remaining);
+        if (take <= 0n) continue;
+        this.emit({ kind: 'fill_reattributed', order, fromTrade: dec.trade, toTrade: inc.trade, qty: take, establishedBy, at: now });
+        inc.amount -= take;
+        remaining -= take;
+      }
+      if (remaining !== 0n) throw new Error(`attribution invariant broken: ${remaining} of source ${dec.trade.eventId} has no new source for ${order.orderId}`);
+    }
+    for (const inc of increases) {
+      if (inc.amount > 0n) this.award(order, inc.trade, establishedBy, inc.amount, inc.role, now);
+    }
+    for (const c of changes) {
+      if (c.next > 0n) order.awardedBySource.set(c.trade.eventId, { trade: c.trade, qty: c.next });
+      else order.awardedBySource.delete(c.trade.eventId);
+    }
+  }
+
+  private award(order: PaperOrder, sourceTrade: TradeEvent, establishedBy: TradeEvent, qty: bigint, role: Role | undefined, now: number): void {
     const n = notional(order.price, qty);
     const fee = feeOn(n, this.config.makerFeeBps);
     const duringCancelPending = order.state === 'cancel_pending';
@@ -483,27 +540,25 @@ export class PaperExchange {
     order.filledQty += qty;
     if (afterCancelEffective) {
       order.lateFilledQty += qty;
-      this.emit({ kind: 'cancel_fill_race', order, trade, at: now, outcome: 'late_fill_after_cancel_effective' });
+      this.emit({ kind: 'cancel_fill_race', order, trade: sourceTrade, at: now, outcome: 'late_fill_after_cancel_effective' });
     } else {
       if (order.filledQty === order.qty) order.state = 'filled';
       if (duringCancelPending) {
-        const outcome: RaceOutcome = trade.marketTime === order.cancelEffectiveAt ? 'fill_wins_tie' : 'fill_wins_before_cancel';
-        this.emit({ kind: 'cancel_fill_race', order, trade, at: now, outcome });
+        const outcome: RaceOutcome = sourceTrade.marketTime === order.cancelEffectiveAt ? 'fill_wins_tie' : 'fill_wins_before_cancel';
+        this.emit({ kind: 'cancel_fill_race', order, trade: sourceTrade, at: now, outcome });
       }
     }
-    const contribution = role?.fill ?? 0n;
-    const fillType: FillType = role?.kind === 'through' ? 'trade_through' : role?.kind === 'queue_exhausted' ? 'queue_exhausted' : 'reordered';
+    const fillType: FillType = role?.kind === 'through' ? 'trade_through' : 'queue_exhausted';
     this.emit({
       kind: 'fill',
       order,
-      trade,
+      sourceTrade,
+      establishedBy,
       qty,
       notional: n,
       fee,
       fillType,
       queueAheadBefore: role?.queueBefore ?? order.queueAhead,
-      venueOrderContribution: contribution,
-      reorderAdjustmentQty: qty - contribution,
       duringCancelPending,
       afterCancelEffective,
       at: now,

@@ -198,20 +198,19 @@ export interface FillEvent extends Base {
   fee: Decimal;
   isPartial: boolean;
   remainingQty: Decimal;
-  tradeEventId: string;
-  tradePrice: Decimal;
-  tradeSize: Decimal;
-  /** Venue time of the print: when the fill actually happened. */
-  tradeMarketTime: number;
-  /** Observation time of the print: when the strategy learned and the portfolio was updated (== simTime). */
+  /** The print that filled us in venue order; its size bounds this fill. */
+  sourceTradeEventId: string;
+  sourceTradePrice: Decimal;
+  sourceTradeSize: Decimal;
+  /** Venue time of the source print: when the fill actually happened. */
+  sourceMarketTime: number;
+  /** The print whose observation established this fill; differs from the source when re-ordering released it. */
+  establishedByTradeEventId: string;
+  establishedByReordering: boolean;
+  /** When the strategy learned and the portfolio was updated (== simTime). */
   observedAt: number;
-  /** reordered: the quantity was released by re-ordering earlier-observed prints rather than by this print itself. */
   fillType: FillType;
   queueAheadBefore: Decimal;
-  /** Quantity the establishing print itself fills in venue order. */
-  venueOrderContribution: Decimal;
-  /** qty - venueOrderContribution: released (positive) or absorbed (negative) by re-ordering earlier-observed prints. */
-  reorderAdjustmentQty: Decimal;
   duringCancelPending: boolean;
   /** The trade was printed while the order was live but observed after the cancel took effect. */
   afterCancelEffective: boolean;
@@ -228,6 +227,27 @@ export interface QueueConsumedEvent extends Base {
   tradeSize: Decimal;
   queueAheadBefore: Decimal;
   queueAheadAfter: Decimal;
+  note: string;
+}
+
+export interface FillReattributedEvent extends Base {
+  type: 'fill_reattributed';
+  orderId: string;
+  /** The fill whose quantity is re-attributed and the portion it was split from. */
+  fillId: string;
+  fromPortionId: string;
+  toPortionId: string;
+  qty: Decimal;
+  fromTradeEventId: string;
+  fromMarketTime: number;
+  toTradeEventId: string;
+  toMarketTime: number;
+  establishedByTradeEventId: string;
+  observedAt: number;
+  /** Horizons whose outcome had not been measured yet and now run from the new source's venue time. */
+  outcomesRebased: number[];
+  /** Horizons already measured on the old source; kept as measured, not re-run (no double counting). */
+  outcomesKept: number[];
   note: string;
 }
 
@@ -267,14 +287,18 @@ export interface TxCostEvent extends Base {
 
 export interface OutcomeEvent extends Base {
   type: 'outcome';
+  /** The booked fill this portion belongs to, and the portion (a fill may be split by re-attribution). */
   fillId: string;
+  portionId: string;
   orderId: string;
   side: Side;
-  /** Venue time of the fill; the horizon is measured from here. */
-  fillMarketTime: number;
-  fillObservedAt: number;
+  sourceTradeEventId: string;
+  /** Venue time of the source print; the horizon is measured from here. */
+  sourceMarketTime: number;
+  /** When the portion was booked (or re-attributed). */
+  observedAt: number;
   horizonMs: number;
-  /** Sim time the outcome became available: max(fillMarketTime + horizonMs, fillObservedAt). */
+  /** Sim time the outcome became available: max(sourceMarketTime + horizonMs, observedAt). */
   availableAt: number;
   fillPrice: Decimal;
   qty: Decimal;
@@ -286,7 +310,7 @@ export interface OutcomeEvent extends Base {
   midSelection: 'venue_time' | 'latest_observed_fallback' | null;
   markout: Decimal | null;
   markoutBps: Decimal | null;
-  status: 'measured' | 'unmeasurable_no_book';
+  status: 'measured' | 'unmeasurable_no_book' | 'superseded_by_reattribution';
 }
 
 export interface ControllerInputEvent extends Base {
@@ -376,6 +400,7 @@ export type LedgerEvent =
   | CancelTooLateEvent
   | CancelFillRaceEvent
   | FillEvent
+  | FillReattributedEvent
   | FillIneligibleEvent
   | FillUncertainEvent
   | QueueConsumedEvent

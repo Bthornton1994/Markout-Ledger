@@ -20,7 +20,7 @@ eligible  <=>  liveAt < trade.marketTime <= cancelEffectiveAt      (cancelEffect
 | print while live, observed after the cancel took effect | in window, `obsTime > cancelEffectiveAt` | **late fill**: the cancel is treated as rejected for that quantity; booked at `obsTime` | `cancel_fill_race(late_fill_after_cancel_effective)` + `fill(afterCancelEffective: true)` |
 | print at the cancel instant | `marketTime == cancelEffectiveAt` | fill wins the tie | `cancel_fill_race(fill_wins_tie)` + `fill` |
 | print after the cancel took effect | `marketTime > cancelEffectiveAt` | no fill | `fill_ineligible(after_cancellation)` |
-| eligible print observed after finalization | `obsTime > cancelEffectiveAt + maxTradeLagMs` | cannot be established; **not awarded** | `fill_uncertain(observed_after_finalization)` |
+| eligible print discarded as stale | `obsTime - marketTime > maxStalenessMs` | cannot be established; **not awarded** | `observation_rejected(stale_observation)` + `fill_uncertain(stale_print_discarded)` |
 
 ### Prints observed out of venue order (bounded reordering window)
 
@@ -35,8 +35,9 @@ awarded now  =  F(prints known now)  -  F(prints known before)      (never negat
 at the observation time of the arriving print. Consequences:
 
 - Every award is supported by prints actually observed; nothing is ever revised downward, so the policy, the portfolio and the ledger stay causal (a print affects nothing before its `obsTime`).
-- A fill may be *released* by an earlier-venue print observed late (`fill.reorderAdjustmentQty > 0`, `fillType: reordered` when the arriving print itself contributes nothing); `fill.venueOrderContribution` records what the arriving print fills on its own.
-- Awards are a lower bound on the venue-time truth until the window has moved past the prints involved.
+- Quantity is booked **per source print**: the print that fills the order in venue order. Every `fill` names its source print and venue time (`sourceTradeEventId`, `sourceMarketTime`; the source's size bounds the fill) and the print whose observation established it (`establishedByTradeEventId`, `establishedByReordering`). In the mirror of Case B (an at-price print absorbed by the queue, then an earlier through print observed late) two fills are booked at the later observation: the through print's own quantity with its venue time, and the at-price print's released quantity with *its* venue time.
+- When a later-observed earlier print changes how already-booked quantity splits across sources (two through prints out of venue order), the booking is not undone: accounting is unchanged and a `fill_reattributed` event moves the provenance of that quantity to its actual source print. Outcome horizons not yet measured for that quantity are re-run from the new source's venue time; horizons already measured are kept (recorded in the event) so nothing is double counted.
+- Awards are a lower bound on the venue-time truth until the window has moved past the prints involved; provenance is exact for the prints known so far and corrected by `fill_reattributed` when a later-observed earlier print re-splits it.
 - Prints with `marketTime < now - maxTradeLagMs` can no longer be preceded by anything observable (a later-observed print with an earlier venue time would exceed the lag bound and is discarded as stale), so that prefix is folded into the orders' checkpoints and is final. The window therefore bounds both the work per arrival and the time until a fill total is final.
 - Prints shared between several of our own orders are re-simulated in price-time priority, so a late earlier print can shift quantity between our orders but never over-award the side.
 

@@ -56,8 +56,10 @@ export interface RunSummary {
     partial: number;
     tradeThrough: number;
     queueExhausted: number;
-    /** Fills released by re-ordering earlier-observed prints into venue order. */
-    reordered: number;
+    /** Fills whose establishing print differs from their source print (released by venue re-ordering). */
+    establishedByReordering: number;
+    /** Re-attributions of already-booked quantity to its actual source print. */
+    reattributed: number;
     lateAfterCancel: number;
     /** Prints at our price that could not have filled us on venue time, by reason. */
     ineligible: number;

@@ -105,16 +105,23 @@ interface WindowStats {
   outcomes: Map<number, HorizonAcc>;
 }
 
-interface FillRecord {
+/**
+ * A portion of a booked fill with a single source print. A fill starts as one portion; a
+ * re-attribution moves quantity into a new portion with the actual source print and venue time.
+ */
+interface FillPortion {
+  portionId: string;
   fillId: string;
   orderId: string;
   side: 'buy' | 'sell';
   price: bigint;
   qty: bigint;
-  /** Venue time of the print that filled us. */
-  marketTime: number;
-  /** Sim time the fill was observed and booked. */
+  sourceTradeEventId: string;
+  /** Venue time of the source print; outcome horizons run from here. */
+  sourceMarketTime: number;
+  /** Sim time the portion was booked or re-attributed. */
   observedAt: number;
+  measured: Set<number>;
 }
 
 interface BookRef {
@@ -168,8 +175,9 @@ class ReplayEngine {
   private readonly accepted: AcceptedInstruction[] = [];
   private win: WindowStats;
   private readonly windowRows: WindowRow[] = [];
-  private readonly fills: FillRecord[] = [];
+  private readonly portions: FillPortion[] = [];
   private fillSeq = 0;
+  private portionSeq = 0;
   private pendingOutcomes = 0;
   private readonly cumulativeOutcomes = new Map<number, HorizonAcc>();
   private readonly controllerWallMs: number[] = [];
@@ -192,7 +200,8 @@ class ReplayEngine {
     partialFills: 0,
     tradeThrough: 0,
     queueExhausted: 0,
-    reordered: 0,
+    establishedByReordering: 0,
+    reattributed: 0,
     queueConsumedWithoutFill: 0,
     observationsAccepted: 0,
     observationsRejected: 0,
@@ -536,6 +545,9 @@ class ReplayEngine {
       case 'fill':
         this.onFill(ev);
         return;
+      case 'fill_reattributed':
+        this.onReattribution(ev);
+        return;
       case 'fill_ineligible':
         this.totals.fillsIneligible++;
         this.win.fillsIneligible++;
@@ -602,8 +614,9 @@ class ReplayEngine {
       this.win.partialFills++;
     }
     if (ev.fillType === 'trade_through') this.totals.tradeThrough++;
-    else if (ev.fillType === 'queue_exhausted') this.totals.queueExhausted++;
-    else this.totals.reordered++;
+    else this.totals.queueExhausted++;
+    const establishedByReordering = ev.establishedBy.eventId !== ev.sourceTrade.eventId;
+    if (establishedByReordering) this.totals.establishedByReordering++;
     if (ev.afterCancelEffective) {
       this.totals.lateFillsAfterCancel++;
       this.win.lateFillsAfterCancel++;
@@ -620,37 +633,35 @@ class ReplayEngine {
       fee: fmtMoney(ev.fee),
       isPartial,
       remainingQty: fmtQty(remainingQty(o)),
-      tradeEventId: ev.trade.eventId,
-      tradePrice: fmtPrice(ev.trade.price),
-      tradeSize: fmtQty(ev.trade.size),
-      tradeMarketTime: ev.trade.marketTime,
+      sourceTradeEventId: ev.sourceTrade.eventId,
+      sourceTradePrice: fmtPrice(ev.sourceTrade.price),
+      sourceTradeSize: fmtQty(ev.sourceTrade.size),
+      sourceMarketTime: ev.sourceTrade.marketTime,
+      establishedByTradeEventId: ev.establishedBy.eventId,
+      establishedByReordering,
       observedAt: this.now,
       fillType: ev.fillType,
       queueAheadBefore: fmtQty(ev.queueAheadBefore),
-      venueOrderContribution: fmtQty(ev.venueOrderContribution),
-      reorderAdjustmentQty: fmtQty(ev.reorderAdjustmentQty),
       duringCancelPending: ev.duringCancelPending,
       afterCancelEffective: ev.afterCancelEffective,
       realizedDelta: fmtMoney(app.realizedDelta),
       inventoryAfter: fmtQty(app.inventoryAfter),
       cashAfter: fmtMoney(app.cashAfter),
     });
-    const rec: FillRecord = {
+    const portion: FillPortion = {
+      portionId: `p${++this.portionSeq}`,
       fillId,
       orderId: o.orderId,
       side: o.side,
       price: o.price,
       qty: ev.qty,
-      marketTime: ev.trade.marketTime,
+      sourceTradeEventId: ev.sourceTrade.eventId,
+      sourceMarketTime: ev.sourceTrade.marketTime,
       observedAt: this.now,
+      measured: new Set(),
     };
-    this.fills.push(rec);
-    for (const h of this.cfg.outcomeHorizonsMs) {
-      // The horizon runs on venue time; the outcome cannot become available before the fill was observed.
-      const at = Math.max(this.now, rec.marketTime + h);
-      this.pendingOutcomes++;
-      if (at <= this.end) this.scheduler.schedule(at, Priority.OUTCOME, () => this.measureOutcome(rec, h));
-    }
+    this.portions.push(portion);
+    for (const h of this.cfg.outcomeHorizonsMs) this.scheduleOutcome(portion, h);
     if (absBig(app.inventoryAfter) > this.cfg.risk.maxPosition) {
       this.totals.positionOverruns++;
       this.ledger.append({
@@ -666,6 +677,73 @@ class ReplayEngine {
     this.checkLossLimit();
   }
 
+  /** The horizon runs on the source print's venue time; the outcome cannot become available before the portion was booked. */
+  private scheduleOutcome(portion: FillPortion, horizonMs: number): void {
+    const at = Math.max(this.now, portion.sourceMarketTime + horizonMs);
+    this.pendingOutcomes++;
+    if (at <= this.end) this.scheduler.schedule(at, Priority.OUTCOME, () => this.measureOutcome(portion, horizonMs));
+  }
+
+  /**
+   * Already-booked quantity moves to its actual source print. Accounting is untouched. The affected
+   * portion shrinks and a new portion carries the quantity with the new source and venue time; horizons
+   * not yet measured on the old portion are re-run from the new source, measured ones are kept.
+   */
+  private onReattribution(ev: Extract<ExecutionEvent, { kind: 'fill_reattributed' }>): void {
+    let remaining = ev.qty;
+    const candidates = this.portions.filter((p) => p.orderId === ev.order.orderId && p.sourceTradeEventId === ev.fromTrade.eventId && p.qty > 0n).reverse();
+    for (const from of candidates) {
+      if (remaining <= 0n) break;
+      const take = from.qty < remaining ? from.qty : remaining;
+      from.qty -= take;
+      remaining -= take;
+      const to: FillPortion = {
+        portionId: `p${++this.portionSeq}`,
+        fillId: from.fillId,
+        orderId: from.orderId,
+        side: from.side,
+        price: from.price,
+        qty: take,
+        sourceTradeEventId: ev.toTrade.eventId,
+        sourceMarketTime: ev.toTrade.marketTime,
+        observedAt: this.now,
+        measured: new Set(),
+      };
+      this.portions.push(to);
+      const outcomesRebased: number[] = [];
+      const outcomesKept: number[] = [];
+      for (const h of this.cfg.outcomeHorizonsMs) {
+        if (from.measured.has(h)) {
+          to.measured.add(h);
+          outcomesKept.push(h);
+        } else {
+          outcomesRebased.push(h);
+          this.scheduleOutcome(to, h);
+        }
+      }
+      this.totals.reattributed++;
+      this.ledger.append({
+        type: 'fill_reattributed',
+        simTime: this.now,
+        orderId: from.orderId,
+        fillId: from.fillId,
+        fromPortionId: from.portionId,
+        toPortionId: to.portionId,
+        qty: fmtQty(take),
+        fromTradeEventId: ev.fromTrade.eventId,
+        fromMarketTime: ev.fromTrade.marketTime,
+        toTradeEventId: ev.toTrade.eventId,
+        toMarketTime: ev.toTrade.marketTime,
+        establishedByTradeEventId: ev.establishedBy.eventId,
+        observedAt: this.now,
+        outcomesRebased,
+        outcomesKept,
+        note: 'venue-order provenance of already-booked quantity moved to its actual source print; cash, inventory and fees unchanged',
+      });
+    }
+    if (remaining !== 0n) throw new Error(`re-attribution of ${ev.qty} from ${ev.fromTrade.eventId} exceeds booked portions for ${ev.order.orderId}`);
+  }
+
   /** Latest observed book whose venue time does not exceed `targetMarketTime`, else the latest observed book. */
   private bookAtVenueTime(targetMarketTime: number): { ref: BookRef; selection: 'venue_time' | 'latest_observed_fallback' } | null {
     let best: BookRef | null = null;
@@ -677,20 +755,23 @@ class ReplayEngine {
     return last ? { ref: last, selection: 'latest_observed_fallback' } : null;
   }
 
-  private measureOutcome(fill: FillRecord, horizonMs: number): void {
+  private measureOutcome(fill: FillPortion, horizonMs: number): void {
     this.pendingOutcomes--;
-    const chosen = this.bookAtVenueTime(fill.marketTime + horizonMs);
+    fill.measured.add(horizonMs);
+    const chosen = fill.qty > 0n ? this.bookAtVenueTime(fill.sourceMarketTime + horizonMs) : null;
     const fillNotional = notional(fill.price, fill.qty);
     if (!chosen) {
-      this.totals.outcomesUnmeasurable++;
+      if (fill.qty > 0n) this.totals.outcomesUnmeasurable++;
       this.ledger.append({
         type: 'outcome',
         simTime: this.now,
         fillId: fill.fillId,
+        portionId: fill.portionId,
         orderId: fill.orderId,
         side: fill.side,
-        fillMarketTime: fill.marketTime,
-        fillObservedAt: fill.observedAt,
+        sourceTradeEventId: fill.sourceTradeEventId,
+        sourceMarketTime: fill.sourceMarketTime,
+        observedAt: fill.observedAt,
         horizonMs,
         availableAt: this.now,
         fillPrice: fmtPrice(fill.price),
@@ -702,7 +783,7 @@ class ReplayEngine {
         midSelection: null,
         markout: null,
         markoutBps: null,
-        status: 'unmeasurable_no_book',
+        status: fill.qty > 0n ? 'unmeasurable_no_book' : 'superseded_by_reattribution',
       });
       return;
     }
@@ -722,10 +803,12 @@ class ReplayEngine {
       type: 'outcome',
       simTime: this.now,
       fillId: fill.fillId,
+      portionId: fill.portionId,
       orderId: fill.orderId,
       side: fill.side,
-      fillMarketTime: fill.marketTime,
-      fillObservedAt: fill.observedAt,
+      sourceTradeEventId: fill.sourceTradeEventId,
+      sourceMarketTime: fill.sourceMarketTime,
+      observedAt: fill.observedAt,
       horizonMs,
       availableAt: this.now,
       fillPrice: fmtPrice(fill.price),
@@ -1218,7 +1301,8 @@ class ReplayEngine {
         partial: t.partialFills,
         tradeThrough: t.tradeThrough,
         queueExhausted: t.queueExhausted,
-        reordered: t.reordered,
+        establishedByReordering: t.establishedByReordering,
+        reattributed: t.reattributed,
         lateAfterCancel: t.lateFillsAfterCancel,
         ineligible: t.fillsIneligible,
         ineligibleByReason: {

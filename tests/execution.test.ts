@@ -284,7 +284,8 @@ describe('paper execution model', () => {
       const f = h.fills();
       expect(f).toHaveLength(1);
       expect(f[0]!.at).toBe(T0 + 400);
-      expect(f[0]!.trade.marketTime).toBe(T0 + 151);
+      expect(f[0]!.sourceTrade.marketTime).toBe(T0 + 151);
+      expect(f[0]!.establishedBy.eventId).toBe(f[0]!.sourceTrade.eventId);
       expect(f[0]!.afterCancelEffective).toBe(false);
     });
 
