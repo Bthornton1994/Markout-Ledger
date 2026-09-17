@@ -31,7 +31,7 @@ import type { ControllerContext, OutcomeHorizonStats, SteeringController, Window
 import { EXECUTION_ASSUMPTIONS, FILL_UNCERTAINTY_NOTE, PaperExchange, openExposure, remainingQty, type ExecutionEvent } from '../execution/paper.js';
 import { Ledger } from '../ledger/ledger.js';
 import { SYNTHETIC_LABEL, fixtureContentHash, midPrice, type BookEvent, type Fixture, type MarketEvent } from '../market/events.js';
-import { StreamValidator, checkStaleness } from '../market/validation.js';
+import { StreamValidator, checkStaleness, reject as rejectObservation, type Rejection } from '../market/validation.js';
 import type { FastPolicy, PolicyDecision, PolicyInput, RestingView } from '../policy/types.js';
 import { Portfolio, valuationToWire, type Mark } from '../portfolio/accounting.js';
 import { RiskGate } from '../risk/gate.js';
@@ -100,6 +100,8 @@ interface WindowStats {
   sellFillQty: bigint;
   partialFills: number;
   queueConsumedWithoutFill: number;
+  lateFillsAfterCancel: number;
+  fillsIneligible: number;
   outcomes: Map<number, HorizonAcc>;
 }
 
@@ -109,7 +111,17 @@ interface FillRecord {
   side: 'buy' | 'sell';
   price: bigint;
   qty: bigint;
-  time: number;
+  /** Venue time of the print that filled us. */
+  marketTime: number;
+  /** Sim time the fill was observed and booked. */
+  observedAt: number;
+}
+
+interface BookRef {
+  eventId: string;
+  obsTime: number;
+  marketTime: number;
+  mid: bigint;
 }
 
 function newHorizonAcc(): HorizonAcc {
@@ -148,6 +160,11 @@ class ReplayEngine {
   private now: number;
 
   private latestBook: BookEvent | null = null;
+  /** Every accepted two-sided book, for venue-time outcome measurement. */
+  private readonly bookHistory: BookRef[] = [];
+  private readonly validator: StreamValidator;
+  private fileIndex = 0;
+  private consumedEvents = 0;
   private readonly accepted: AcceptedInstruction[] = [];
   private win: WindowStats;
   private readonly windowRows: WindowRow[] = [];
@@ -183,6 +200,13 @@ class ReplayEngine {
     rejectedFailed: 0,
     rejectedInvalid: 0,
     outcomesUnmeasurable: 0,
+    lateFillsAfterCancel: 0,
+    fillsIneligible: 0,
+    ineligiblePredatesActivation: 0,
+    ineligibleAtActivationInstant: 0,
+    ineligibleAfterCancellation: 0,
+    fillsUncertain: 0,
+    positionOverruns: 0,
   };
 
   constructor(deps: ReplayDeps) {
@@ -194,9 +218,12 @@ class ReplayEngine {
     this.ledger = new Ledger(deps.ledgerSink);
     this.portfolio = new Portfolio(this.cfg.initialCash);
     this.gate = new RiskGate(this.cfg.risk);
-    this.exchange = new PaperExchange(this.cfg.execution, this.scheduler, (ev) => this.onExecutionEvent(ev), () => this.latestBook);
+    this.exchange = new PaperExchange(this.cfg.execution, this.scheduler, (ev) => this.onExecutionEvent(ev), () => this.latestBook, {
+      maxTradeLagMs: this.cfg.maxStalenessMs,
+    });
 
     const h = this.fixture.header;
+    this.validator = new StreamValidator(h);
     this.start = h.startTime;
     const coverable = Math.floor((h.endTime - h.startTime) / this.cfg.windowMs);
     this.numWindows = this.cfg.numWindows ?? coverable;
@@ -237,42 +264,9 @@ class ReplayEngine {
       assumptions: [...EXECUTION_ASSUMPTIONS],
     });
 
-    // Structural validation in file order; only structurally valid events are scheduled.
-    const validator = new StreamValidator(h);
-    for (const ev of this.fixture.events) {
-      const verdict = validator.checkStructure(ev);
-      if (!verdict.ok) {
-        this.totals.observationsRejected++;
-        this.ledger.append({
-          type: 'observation_rejected',
-          simTime: this.start,
-          eventId: ev.eventId,
-          seq: ev.seq,
-          obsTime: ev.obsTime,
-          marketTime: ev.marketTime,
-          reason: verdict.reason,
-          detail: verdict.detail,
-          phase: 'structural',
-        });
-        continue;
-      }
-      if (ev.obsTime < this.start || ev.obsTime > this.end) {
-        this.totals.observationsRejected++;
-        this.ledger.append({
-          type: 'observation_rejected',
-          simTime: this.start,
-          eventId: ev.eventId,
-          seq: ev.seq,
-          obsTime: ev.obsTime,
-          marketTime: ev.marketTime,
-          reason: 'outside_replay_range',
-          detail: `obsTime outside [${this.start}, ${this.end}]`,
-          phase: 'structural',
-        });
-        continue;
-      }
-      this.scheduler.schedule(ev.obsTime, Priority.MARKET, () => this.onMarketEvent(ev));
-    }
+    // The stream is consumed lazily in file order: each event is validated and logged when it is
+    // encountered, so a bad event later in the file cannot leave a trace earlier in the ledger.
+    this.pullNextEvent();
 
     for (let k = 1; k <= this.numWindows; k++) {
       this.scheduler.schedule(this.start + k * this.cfg.windowMs, Priority.WINDOW, () => this.onWindowBoundary(k - 1));
@@ -304,24 +298,64 @@ class ReplayEngine {
 
   // ---------------------------------------------------------------- market
 
-  private onMarketEvent(ev: MarketEvent): void {
-    const stale = checkStaleness(ev, this.cfg.maxStalenessMs);
-    if (!stale.ok) {
-      this.totals.observationsRejected++;
-      this.win.rejectedObservations++;
-      this.ledger.append({
-        type: 'observation_rejected',
-        simTime: this.now,
-        eventId: ev.eventId,
-        seq: ev.seq,
-        obsTime: ev.obsTime,
-        marketTime: ev.marketTime,
-        reason: stale.reason,
-        detail: stale.detail,
-        phase: 'content',
-      });
+  /** Pull events from the fixture in file order until one can be scheduled at a future obsTime. */
+  private pullNextEvent(): void {
+    const events = this.fixture.events;
+    while (this.fileIndex < events.length) {
+      const ev = events[this.fileIndex++]!;
+      if (ev.obsTime < this.start) {
+        this.consumedEvents++;
+        this.rejectObservation(ev, rejectObservation('outside_replay_range', `obsTime ${ev.obsTime} precedes replay start ${this.start}`));
+        continue;
+      }
+      const order = this.validator.checkOrder(ev);
+      if (!order.ok) {
+        this.consumedEvents++;
+        this.rejectObservation(ev, order);
+        continue;
+      }
+      this.scheduler.schedule(ev.obsTime, Priority.MARKET, () => this.onMarketEvent(ev));
       return;
     }
+  }
+
+  private rejectObservation(ev: MarketEvent, r: Rejection): void {
+    this.totals.observationsRejected++;
+    this.win.rejectedObservations++;
+    this.ledger.append({
+      type: 'observation_rejected',
+      simTime: this.now,
+      eventId: ev.eventId,
+      seq: ev.seq,
+      obsTime: ev.obsTime,
+      marketTime: ev.marketTime,
+      reason: r.reason,
+      detail: r.detail,
+      phase: r.phase,
+      encounteredAt: this.now,
+    });
+  }
+
+  private onMarketEvent(ev: MarketEvent): void {
+    this.consumedEvents++;
+    try {
+      const arrival = this.validator.checkArrival(ev);
+      if (!arrival.ok) {
+        this.rejectObservation(ev, arrival);
+        return;
+      }
+      const stale = checkStaleness(ev, this.cfg.maxStalenessMs);
+      if (!stale.ok) {
+        this.rejectObservation(ev, stale);
+        return;
+      }
+      this.acceptObservation(ev);
+    } finally {
+      this.pullNextEvent();
+    }
+  }
+
+  private acceptObservation(ev: MarketEvent): void {
     this.totals.observationsAccepted++;
     if (ev.type === 'book') {
       const bb = ev.bids[0];
@@ -347,6 +381,7 @@ class ReplayEngine {
       this.win.bookCount++;
       const mid = midPrice(ev);
       if (mid !== null && bb && ba) {
+        this.bookHistory.push({ eventId: ev.eventId, obsTime: ev.obsTime, marketTime: ev.marketTime, mid });
         if (this.win.firstMid === null) this.win.firstMid = mid;
         this.win.lastMid = mid;
         this.win.minMid = this.win.minMid === null ? mid : minBig(this.win.minMid, mid);
@@ -413,8 +448,10 @@ class ReplayEngine {
           qty: fmtQty(o.qty),
           liveAt: ev.at,
           queueAhead: fmtQty(o.queueAhead),
-          queueSource: 'displayed size at our price level in latest book at live time (0 if level absent)',
+          queueSource: 'displayed size at our price level in the latest observed book at live time (0 if level absent)',
           bookEventId: o.queueBookEventId,
+          bookMarketTime: o.queueBookMarketTime,
+          bookLagMs: o.queueBookMarketTime === null ? null : ev.at - o.queueBookMarketTime,
           fillUncertainty: FILL_UNCERTAINTY_NOTE,
         });
         return;
@@ -456,6 +493,7 @@ class ReplayEngine {
           orderId: o.orderId,
           remainingQty: fmtQty(remainingQty(o)),
           filledQty: fmtQty(o.filledQty),
+          finalAt: ev.finalAt,
         });
         return;
       case 'cancel_too_late':
@@ -472,9 +510,10 @@ class ReplayEngine {
           tradeEventId: ev.trade.eventId,
           cancelRequestedAt: o.cancelRequestedAt ?? -1,
           cancelEffectiveAt: o.cancelEffectiveAt ?? -1,
+          tradeMarketTime: ev.trade.marketTime,
           tradeObsTime: ev.trade.obsTime,
-          outcome: 'fill_wins',
-          rule: 'trade processed before cancel takes effect (cancelEffectiveAt >= trade obsTime)',
+          outcome: ev.outcome,
+          rule: 'eligible iff liveAt < trade.marketTime <= cancelEffectiveAt; a qualifying trade observed after the cancel took effect is a late fill',
         });
         return;
       case 'queue_consumed':
@@ -493,6 +532,46 @@ class ReplayEngine {
         return;
       case 'fill':
         this.onFill(ev);
+        return;
+      case 'fill_ineligible':
+        this.totals.fillsIneligible++;
+        this.win.fillsIneligible++;
+        if (ev.reason === 'predates_activation') this.totals.ineligiblePredatesActivation++;
+        else if (ev.reason === 'at_activation_instant') this.totals.ineligibleAtActivationInstant++;
+        else this.totals.ineligibleAfterCancellation++;
+        this.ledger.append({
+          type: 'fill_ineligible',
+          simTime: this.now,
+          orderId: o.orderId,
+          tradeEventId: ev.trade.eventId,
+          tradeMarketTime: ev.trade.marketTime,
+          tradeObsTime: ev.trade.obsTime,
+          orderLiveAt: o.liveAt,
+          cancelEffectiveAt: o.cancelEffectiveAt,
+          reason: ev.reason,
+          note:
+            ev.reason === 'at_activation_instant'
+              ? 'print and activation share a venue millisecond; ordering unknown, no fill awarded'
+              : ev.reason === 'predates_activation'
+                ? 'print happened (marketTime) before the order rested on the book; observed afterwards'
+                : 'print happened after the cancel took effect on the venue',
+        });
+        return;
+      case 'fill_uncertain':
+        this.totals.fillsUncertain++;
+        this.ledger.append({
+          type: 'fill_uncertain',
+          simTime: this.now,
+          orderId: o.orderId,
+          tradeEventId: ev.trade.eventId,
+          tradeMarketTime: ev.trade.marketTime,
+          tradeObsTime: ev.trade.obsTime,
+          orderLiveAt: o.liveAt,
+          cancelEffectiveAt: o.cancelEffectiveAt,
+          finalAt: o.finalAt,
+          reason: ev.reason,
+          note: 'print was eligible on venue time but observed after the order was finalized; fill cannot be established, none awarded',
+        });
         return;
       default:
         return;
@@ -521,6 +600,10 @@ class ReplayEngine {
     }
     if (ev.fillType === 'trade_through') this.totals.tradeThrough++;
     else this.totals.queueExhausted++;
+    if (ev.afterCancelEffective) {
+      this.totals.lateFillsAfterCancel++;
+      this.win.lateFillsAfterCancel++;
+    }
     this.ledger.append({
       type: 'fill',
       simTime: this.now,
@@ -536,29 +619,63 @@ class ReplayEngine {
       tradeEventId: ev.trade.eventId,
       tradePrice: fmtPrice(ev.trade.price),
       tradeSize: fmtQty(ev.trade.size),
+      tradeMarketTime: ev.trade.marketTime,
+      observedAt: this.now,
       fillType: ev.fillType,
       queueAheadBefore: fmtQty(ev.queueAheadBefore),
       duringCancelPending: ev.duringCancelPending,
+      afterCancelEffective: ev.afterCancelEffective,
       realizedDelta: fmtMoney(app.realizedDelta),
       inventoryAfter: fmtQty(app.inventoryAfter),
       cashAfter: fmtMoney(app.cashAfter),
     });
-    const rec: FillRecord = { fillId, orderId: o.orderId, side: o.side, price: o.price, qty: ev.qty, time: this.now };
+    const rec: FillRecord = {
+      fillId,
+      orderId: o.orderId,
+      side: o.side,
+      price: o.price,
+      qty: ev.qty,
+      marketTime: ev.trade.marketTime,
+      observedAt: this.now,
+    };
     this.fills.push(rec);
     for (const h of this.cfg.outcomeHorizonsMs) {
-      const at = this.now + h;
+      // The horizon runs on venue time; the outcome cannot become available before the fill was observed.
+      const at = Math.max(this.now, rec.marketTime + h);
       this.pendingOutcomes++;
       if (at <= this.end) this.scheduler.schedule(at, Priority.OUTCOME, () => this.measureOutcome(rec, h));
+    }
+    if (absBig(app.inventoryAfter) > this.cfg.risk.maxPosition) {
+      this.totals.positionOverruns++;
+      this.ledger.append({
+        type: 'risk_breach',
+        simTime: this.now,
+        kind: 'position_overrun',
+        detail: `inventory ${fmtQty(app.inventoryAfter)} exceeds max position ${fmtQty(this.cfg.risk.maxPosition)} after ${ev.afterCancelEffective ? 'a late fill on a provisionally cancelled order' : 'a fill'}; the gate rejects any further increasing order`,
+        netPnl: fmtMoney(this.portfolio.valuation(this.currentMark()).netPnl),
+        limit: fmtQty(this.cfg.risk.maxPosition),
+        action: 'no kill switch; increasing orders are rejected by the position limit until inventory is reduced',
+      });
     }
     this.checkLossLimit();
   }
 
+  /** Latest observed book whose venue time does not exceed `targetMarketTime`, else the latest observed book. */
+  private bookAtVenueTime(targetMarketTime: number): { ref: BookRef; selection: 'venue_time' | 'latest_observed_fallback' } | null {
+    let best: BookRef | null = null;
+    for (const b of this.bookHistory) {
+      if (b.marketTime <= targetMarketTime && (best === null || b.marketTime >= best.marketTime)) best = b;
+    }
+    if (best) return { ref: best, selection: 'venue_time' };
+    const last = this.bookHistory[this.bookHistory.length - 1];
+    return last ? { ref: last, selection: 'latest_observed_fallback' } : null;
+  }
+
   private measureOutcome(fill: FillRecord, horizonMs: number): void {
     this.pendingOutcomes--;
-    const book = this.latestBook;
-    const mid = book ? midPrice(book) : null;
+    const chosen = this.bookAtVenueTime(fill.marketTime + horizonMs);
     const fillNotional = notional(fill.price, fill.qty);
-    if (!book || mid === null) {
+    if (!chosen) {
       this.totals.outcomesUnmeasurable++;
       this.ledger.append({
         type: 'outcome',
@@ -566,19 +683,24 @@ class ReplayEngine {
         fillId: fill.fillId,
         orderId: fill.orderId,
         side: fill.side,
-        fillTime: fill.time,
+        fillMarketTime: fill.marketTime,
+        fillObservedAt: fill.observedAt,
         horizonMs,
         availableAt: this.now,
         fillPrice: fmtPrice(fill.price),
         qty: fmtQty(fill.qty),
         midAtHorizon: null,
         midEventId: null,
+        midMarketTime: null,
+        midObsTime: null,
+        midSelection: null,
         markout: null,
         markoutBps: null,
         status: 'unmeasurable_no_book',
       });
       return;
     }
+    const mid = chosen.ref.mid;
     const midValue = notional(mid, fill.qty);
     const markout = fill.side === 'buy' ? midValue - fillNotional : fillNotional - midValue;
     const markoutBps = bpsOf(markout, fillNotional);
@@ -596,13 +718,17 @@ class ReplayEngine {
       fillId: fill.fillId,
       orderId: fill.orderId,
       side: fill.side,
-      fillTime: fill.time,
+      fillMarketTime: fill.marketTime,
+      fillObservedAt: fill.observedAt,
       horizonMs,
       availableAt: this.now,
       fillPrice: fmtPrice(fill.price),
       qty: fmtQty(fill.qty),
       midAtHorizon: fmtPrice(mid),
-      midEventId: book.eventId,
+      midEventId: chosen.ref.eventId,
+      midMarketTime: chosen.ref.marketTime,
+      midObsTime: chosen.ref.obsTime,
+      midSelection: chosen.selection,
       markout: fmtMoney(markout),
       markoutBps: fmtMoney(markoutBps),
       status: 'measured',
@@ -814,6 +940,8 @@ class ReplayEngine {
       sellFillQty: 0n,
       partialFills: 0,
       queueConsumedWithoutFill: 0,
+      lateFillsAfterCancel: 0,
+      fillsIneligible: 0,
       outcomes: new Map(),
     };
   }
@@ -860,6 +988,8 @@ class ReplayEngine {
         sellFillQty: fmtQty(w.sellFillQty),
         partialFills: w.partialFills,
         queueConsumedWithoutFill: w.queueConsumedWithoutFill,
+        lateFillsAfterCancel: w.lateFillsAfterCancel,
+        fillsIneligible: w.fillsIneligible,
       },
       outcomes: {
         horizonsMs: [...this.cfg.outcomeHorizonsMs],
@@ -1082,6 +1212,14 @@ class ReplayEngine {
         partial: t.partialFills,
         tradeThrough: t.tradeThrough,
         queueExhausted: t.queueExhausted,
+        lateAfterCancel: t.lateFillsAfterCancel,
+        ineligible: t.fillsIneligible,
+        ineligibleByReason: {
+          predatesActivation: t.ineligiblePredatesActivation,
+          atActivationInstant: t.ineligibleAtActivationInstant,
+          afterCancellation: t.ineligibleAfterCancellation,
+        },
+        uncertain: t.fillsUncertain,
       },
       fillUncertainty: {
         model: 'pessimistic_back_of_queue',
@@ -1113,8 +1251,13 @@ class ReplayEngine {
         killSwitchAt: this.gate.killSwitchAt,
         maxPosition: fmtQty(this.cfg.risk.maxPosition),
         maxLoss: fmtMoney(this.cfg.risk.maxLoss),
+        positionOverruns: t.positionOverruns,
       },
-      observations: { accepted: t.observationsAccepted, rejected: t.observationsRejected },
+      observations: {
+        accepted: t.observationsAccepted,
+        rejected: t.observationsRejected,
+        notReached: this.fixture.events.length - this.consumedEvents,
+      },
       windowRows: this.windowRows,
       assumptions: [...EXECUTION_ASSUMPTIONS],
       ledger: { entries: this.ledger.length, headHash: '' },

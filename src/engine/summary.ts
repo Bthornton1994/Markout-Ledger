@@ -56,6 +56,11 @@ export interface RunSummary {
     partial: number;
     tradeThrough: number;
     queueExhausted: number;
+    lateAfterCancel: number;
+    /** Prints at our price that could not have filled us on venue time, by reason. */
+    ineligible: number;
+    ineligibleByReason: { predatesActivation: number; atActivationInstant: number; afterCancellation: number };
+    uncertain: number;
   };
   fillUncertainty: { model: string; note: string; queueConsumedWithoutFill: number };
   outcomes: OutcomeHorizonStats[];
@@ -78,8 +83,8 @@ export interface RunSummary {
       reason: string;
     }>;
   };
-  risk: { killSwitchTripped: boolean; killSwitchAt: number | null; maxPosition: Decimal; maxLoss: Decimal };
-  observations: { accepted: number; rejected: number };
+  risk: { killSwitchTripped: boolean; killSwitchAt: number | null; maxPosition: Decimal; maxLoss: Decimal; positionOverruns: number };
+  observations: { accepted: number; rejected: number; notReached: number };
   windowRows: WindowRow[];
   assumptions: string[];
   ledger: { entries: number; headHash: string };

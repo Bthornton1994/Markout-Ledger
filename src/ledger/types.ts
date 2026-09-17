@@ -11,7 +11,8 @@
  */
 import type { Decimal } from '../core/money.js';
 import type { Aggressor } from '../market/events.js';
-import type { ObservationRejectReason } from '../market/validation.js';
+import type { ObservationRejectReason, RejectPhase } from '../market/validation.js';
+import type { IneligibleReason, RaceOutcome } from '../execution/paper.js';
 import type { SteeringInstruction, SteeringParams } from '../controller/instruction.js';
 import type { WindowReview } from '../controller/types.js';
 
@@ -68,7 +69,10 @@ export interface ObservationRejectedEvent extends Base {
   marketTime: number;
   reason: ObservationRejectReason;
   detail: string;
-  phase: 'structural' | 'content';
+  /** structural: stream identity/ordering (duplicate, seq, out of order, range). content: the event itself. */
+  phase: RejectPhase;
+  /** Rejections are appended when the event is encountered in stream order, never earlier. */
+  encounteredAt: number;
 }
 
 export interface PolicyDecisionEvent extends Base {
@@ -141,6 +145,9 @@ export interface OrderLiveEvent extends Base {
   queueAhead: Decimal;
   queueSource: string;
   bookEventId: string | null;
+  /** Venue time of the book used for the queue estimate; it may precede liveAt by the feed lag. */
+  bookMarketTime: number | null;
+  bookLagMs: number | null;
   fillUncertainty: string;
 }
 
@@ -158,6 +165,8 @@ export interface CancelEffectiveEvent extends Base {
   orderId: string;
   remainingQty: Decimal;
   filledQty: Decimal;
+  /** Sim time after which no late trade can be matched to this order; until then the cancel is provisional. */
+  finalAt: number;
 }
 
 export interface CancelTooLateEvent extends Base {
@@ -172,8 +181,9 @@ export interface CancelFillRaceEvent extends Base {
   tradeEventId: string;
   cancelRequestedAt: number;
   cancelEffectiveAt: number;
+  tradeMarketTime: number;
   tradeObsTime: number;
-  outcome: 'fill_wins';
+  outcome: RaceOutcome;
   rule: string;
 }
 
@@ -191,9 +201,15 @@ export interface FillEvent extends Base {
   tradeEventId: string;
   tradePrice: Decimal;
   tradeSize: Decimal;
+  /** Venue time of the print: when the fill actually happened. */
+  tradeMarketTime: number;
+  /** Observation time of the print: when the strategy learned and the portfolio was updated (== simTime). */
+  observedAt: number;
   fillType: 'trade_through' | 'queue_exhausted';
   queueAheadBefore: Decimal;
   duringCancelPending: boolean;
+  /** The trade was printed while the order was live but observed after the cancel took effect. */
+  afterCancelEffective: boolean;
   /** Accounting effect of this fill. */
   realizedDelta: Decimal;
   inventoryAfter: Decimal;
@@ -210,6 +226,31 @@ export interface QueueConsumedEvent extends Base {
   note: string;
 }
 
+export interface FillIneligibleEvent extends Base {
+  type: 'fill_ineligible';
+  orderId: string;
+  tradeEventId: string;
+  tradeMarketTime: number;
+  tradeObsTime: number;
+  orderLiveAt: number;
+  cancelEffectiveAt: number | null;
+  reason: IneligibleReason;
+  note: string;
+}
+
+export interface FillUncertainEvent extends Base {
+  type: 'fill_uncertain';
+  orderId: string;
+  tradeEventId: string;
+  tradeMarketTime: number;
+  tradeObsTime: number;
+  orderLiveAt: number;
+  cancelEffectiveAt: number | null;
+  finalAt: number | null;
+  reason: 'observed_after_finalization';
+  note: string;
+}
+
 export interface TxCostEvent extends Base {
   type: 'tx_cost';
   orderId: string;
@@ -223,13 +264,20 @@ export interface OutcomeEvent extends Base {
   fillId: string;
   orderId: string;
   side: Side;
-  fillTime: number;
+  /** Venue time of the fill; the horizon is measured from here. */
+  fillMarketTime: number;
+  fillObservedAt: number;
   horizonMs: number;
+  /** Sim time the outcome became available: max(fillMarketTime + horizonMs, fillObservedAt). */
   availableAt: number;
   fillPrice: Decimal;
   qty: Decimal;
   midAtHorizon: Decimal | null;
   midEventId: string | null;
+  midMarketTime: number | null;
+  midObsTime: number | null;
+  /** venue_time: latest observed book whose marketTime <= fillMarketTime + horizon; fallback: latest observed book. */
+  midSelection: 'venue_time' | 'latest_observed_fallback' | null;
   markout: Decimal | null;
   markoutBps: Decimal | null;
   status: 'measured' | 'unmeasurable_no_book';
@@ -278,7 +326,8 @@ export interface ControllerSkippedEvent extends Base {
 
 export interface RiskBreachEvent extends Base {
   type: 'risk_breach';
-  kind: 'loss_limit';
+  /** loss_limit trips the kill switch; position_overrun records a late fill pushing inventory past the limit. */
+  kind: 'loss_limit' | 'position_overrun';
   detail: string;
   netPnl: Decimal;
   limit: Decimal;
@@ -321,6 +370,8 @@ export type LedgerEvent =
   | CancelTooLateEvent
   | CancelFillRaceEvent
   | FillEvent
+  | FillIneligibleEvent
+  | FillUncertainEvent
   | QueueConsumedEvent
   | TxCostEvent
   | OutcomeEvent

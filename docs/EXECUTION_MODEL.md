@@ -2,6 +2,37 @@
 
 Implementation: `src/execution/paper.ts`. Every assumption below is also written into each ledger's `replay_started.assumptions`.
 
+## Time semantics: venue time decides eligibility, observation time decides knowledge
+
+Every trade carries two timestamps (see EVENT_SCHEMA.md): `marketTime` (when the print happened on the venue) and `obsTime` (when the strategy learned about it). Orders live on the venue clock: `liveAt = submit + orderLatencyMs` and `cancelEffectiveAt = max(request + cancelLatencyMs, liveAt)` are venue instants, assumed to be on the same time base as `marketTime`.
+
+The exchange matches a trade **when it is observed** (at `obsTime`, which is when the portfolio and the policy learn of any fill), but decides **whether it could have filled on venue time**:
+
+```
+eligible  <=>  liveAt < trade.marketTime <= cancelEffectiveAt      (cancelEffectiveAt = +inf while no cancel is requested)
+```
+
+| case | venue vs order | decision | ledger |
+|---|---|---|---|
+| print before activation, observed after | `marketTime < liveAt`, `obsTime >= liveAt` | no fill | `fill_ineligible(predates_activation)` |
+| print at the activation instant | `marketTime == liveAt` | no fill; ordering unknown at ms resolution | `fill_ineligible(at_activation_instant)` |
+| print while live, observed while live | in window | fill | `fill` |
+| print while live, observed after the cancel took effect | in window, `obsTime > cancelEffectiveAt` | **late fill**: the cancel is treated as rejected for that quantity; booked at `obsTime` | `cancel_fill_race(late_fill_after_cancel_effective)` + `fill(afterCancelEffective: true)` |
+| print at the cancel instant | `marketTime == cancelEffectiveAt` | fill wins the tie | `cancel_fill_race(fill_wins_tie)` + `fill` |
+| print after the cancel took effect | `marketTime > cancelEffectiveAt` | no fill | `fill_ineligible(after_cancellation)` |
+| eligible print observed after finalization | `obsTime > cancelEffectiveAt + maxTradeLagMs` | cannot be established; **not awarded** | `fill_uncertain(observed_after_finalization)` |
+
+A cancelled order is therefore *provisional* until `finalAt = cancelEffectiveAt + maxTradeLagMs` (recorded in `cancel_effective`). The engine sets `maxTradeLagMs` to its observation staleness limit (`maxStalenessMs`, default 500 ms), so any trade lagging more than that is rejected as stale before it reaches the exchange; the `fill_uncertain` path exists so the exchange stays honest if it is ever driven with a looser feed. Ineligible prints never consume `queueAhead` either.
+
+Late fills matter for risk: the risk gate charges exposure for orders the strategy considers open (pending, live, cancel in flight), **not** for provisionally cancelled ones. A late fill can therefore push inventory past the position limit after a replacement order was already accepted. The engine logs that as `risk_breach(position_overrun)` (no kill switch) and the gate rejects any further increasing order until inventory is reduced. Counting provisional orders as exposure would block a quoter for `maxTradeLagMs` after every requote and was judged too blunt; the trade-off is documented rather than hidden.
+
+Remaining uncertainty in this model, stated plainly:
+
+- `liveAt` and `cancelEffectiveAt` are modeled constants, not observed venue acknowledgements. Real activation and cancel times are distributions.
+- The queue estimate at `liveAt` uses the latest *observed* book, whose venue time precedes `liveAt` by the feed lag (`order_live.bookLagMs`). Prints between that book's venue time and `liveAt` are ineligible for us but may have thinned the level; the estimate is therefore pessimistic by up to that much.
+- Fill notification latency is folded into the trade's observation lag; a real venue would acknowledge a fill on its own clock.
+- Tie handling at millisecond resolution is a rule, not knowledge: at activation the fill is withheld, at cancellation it is awarded. Both are the adverse choice for a passive quoter.
+
 ## Order lifecycle
 
 ```
@@ -29,7 +60,7 @@ Fill uncertainty is reported, not hidden: every `order_live` carries the uncerta
 
 ## Cancel / fill race
 
-A trade and a cancel are ordered by simulated time; at the same millisecond the scheduler processes market events before order-state transitions, so **the fill wins ties**. This is the pessimistic choice for a passive quoter trying to pull a quote. A cancel that arrives after a full fill is logged as `cancel_too_late`; a fill during a pending cancel is logged as `cancel_fill_race`. `tests/execution.test.ts` and `tests/engine.test.ts` check strictly-before, tie and strictly-after cases and that identical inputs produce identical outcomes. A cancel requested before the order is live cannot take effect before `liveAt`, and an order that is not yet live can never fill.
+A trade and a cancel are ordered on **venue time**: the trade fills if `marketTime <= cancelEffectiveAt`, so **the fill wins ties**, the pessimistic choice for a passive quoter trying to pull a quote. A cancel that arrives after a full fill is logged as `cancel_too_late`; a fill during a pending cancel is logged as `cancel_fill_race` with outcome `fill_wins_before_cancel` or `fill_wins_tie`; a fill observed only after the cancel took effect is `late_fill_after_cancel_effective` (see the table above). `tests/execution.test.ts` and `tests/engine.test.ts` check strictly-before, tie and strictly-after cases on both clocks and that identical inputs produce identical outcomes. A cancel requested before the order is live cannot take effect before `liveAt`, and an order that is not yet live can never fill.
 
 ## Fees and transaction costs
 
@@ -39,6 +70,6 @@ A trade and a cancel are ordered by simulated time; at the same millisecond the 
 ## Not modeled (stated limitations)
 
 - Market impact: our orders are not inserted into the replayed book and the replayed trades are unaffected by our presence.
-- Fill notification latency: the portfolio updates at the trade's `obsTime`.
+- Fill notification latency beyond the trade's observation lag: the portfolio updates at the trade's `obsTime`.
 - Variable or random latency, venue outages, self-match prevention, hidden liquidity, iceberg orders, rebates.
 - Any taker execution, including liquidation of the end-of-run inventory.

@@ -18,15 +18,20 @@ export type ObservationRejectReason =
   | 'wrong_symbol'
   | 'outside_replay_range';
 
+export type RejectPhase = 'structural' | 'content';
+
 export interface Rejection {
   ok: false;
   reason: ObservationRejectReason;
   detail: string;
+  phase: RejectPhase;
 }
 export type Verdict = { ok: true } | Rejection;
 
-function reject(reason: ObservationRejectReason, detail: string): Rejection {
-  return { ok: false, reason, detail };
+const STRUCTURAL: ReadonlySet<ObservationRejectReason> = new Set(['duplicate_event', 'out_of_order', 'non_increasing_seq', 'outside_replay_range']);
+
+export function reject(reason: ObservationRejectReason, detail: string): Rejection {
+  return { ok: false, reason, detail, phase: STRUCTURAL.has(reason) ? 'structural' : 'content' };
 }
 
 export function checkMalformed(ev: MarketEvent, header: FixtureHeader): Verdict {
@@ -67,25 +72,36 @@ function checkTrade(ev: TradeEvent): Verdict {
   return { ok: true };
 }
 
-/** Stateful structural validator: call in file order. */
+/**
+ * Stateful stream validator. The engine consumes the fixture lazily, in file order, so every
+ * rejection is appended to the ledger at the simulated time the event is encountered:
+ *
+ *   checkOrder   when the event is pulled from the stream (its obsTime must not precede the stream position)
+ *   checkArrival when the event is processed at its obsTime (identity, seq, content)
+ */
 export class StreamValidator {
   private readonly seen = new Set<string>();
   private lastSeq = -1;
-  private lastObsTime = Number.NEGATIVE_INFINITY;
+  private streamObsTime = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly header: FixtureHeader) {}
 
-  checkStructure(ev: MarketEvent): Verdict {
+  checkOrder(ev: MarketEvent): Verdict {
+    if (!Number.isInteger(ev.obsTime)) return reject('malformed_event', 'obsTime must be an integer millisecond');
+    if (ev.obsTime < this.streamObsTime) {
+      return reject('out_of_order', `obsTime ${ev.obsTime} arrived after stream position ${this.streamObsTime}`);
+    }
+    this.streamObsTime = ev.obsTime;
+    return { ok: true };
+  }
+
+  checkArrival(ev: MarketEvent): Verdict {
     if (this.seen.has(ev.eventId)) return reject('duplicate_event', `eventId ${ev.eventId} already seen`);
     if (ev.seq <= this.lastSeq) return reject('non_increasing_seq', `seq ${ev.seq} after ${this.lastSeq}`);
-    if (ev.obsTime < this.lastObsTime) {
-      return reject('out_of_order', `obsTime ${ev.obsTime} arrived after ${this.lastObsTime}`);
-    }
     const malformed = checkMalformed(ev, this.header);
     if (!malformed.ok) return malformed;
     this.seen.add(ev.eventId);
     this.lastSeq = ev.seq;
-    this.lastObsTime = ev.obsTime;
     return { ok: true };
   }
 }

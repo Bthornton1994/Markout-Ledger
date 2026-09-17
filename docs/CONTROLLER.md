@@ -27,7 +27,7 @@ Only information available at the boundary:
 - outcomes: per-horizon markout stats for outcomes **whose measurement horizon elapsed inside this window** (they may belong to earlier fills), the count of fills still pending, and cumulative stats
 - portfolio valuation at the boundary (conservative mark) and risk state (limits, position utilisation, kill switch)
 
-An outcome for a fill at time `f` with horizon `h` exists only from `f + h` onward. A fill at `T - 200 ms` with a 1 s horizon is `pending` in the review at `T` and `measured` in the review at `T + 3000`. This is tested.
+An outcome for a fill printed at venue time `f` and observed at `o` with horizon `h` exists only from `max(f + h, o)` onward. A fill at `T - 200 ms` with a 1 s horizon is `pending` in the review at `T` and `measured` in the review at `T + 3000`. This is tested. The review also counts `lateFillsAfterCancel` and `fillsIneligible` so a controller can see how much of the window's activity was decided on venue time after the fact.
 
 ## Instruction contract
 

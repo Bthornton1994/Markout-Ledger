@@ -4,7 +4,7 @@
 
 ```bash
 npm install
-npm run typecheck                                  # tsc --noEmit
+npm run typecheck                                  # tsc --noEmit (CI runs the same steps: .github/workflows/ci.yml)
 npm test                                           # vitest run
 npm run fixtures                                   # regenerate fixtures/*.jsonl from their seeds (byte-identical)
 npm run replay -- --scenario baseline --out out    # one scenario, three runs

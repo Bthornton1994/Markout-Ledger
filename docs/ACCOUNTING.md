@@ -21,6 +21,10 @@ fee(notional, bps)   = ceil(notional * bps / 10_000)              (rounded UP, a
 | `grossRealized` | realized P&L before fees and costs |
 | `feesPaid`, `txCostsPaid` | cumulative maker fees and fixed placement/cancel costs |
 
+## When a fill is booked
+
+A fill is booked at the trade's **observation time** (`fill.observedAt == simTime`), which is when the strategy learns about it. The fill's venue time (`fill.tradeMarketTime`) is recorded alongside and drives outcome horizons, not accounting. A late fill on a provisionally cancelled order is booked exactly like any other fill, when it is observed.
+
 ## Fill update
 
 For a fill with side sign `s` (+1 buy, -1 sell), price `p`, quantity `q`, fee `f`, notional `N = notional(p, q)`:

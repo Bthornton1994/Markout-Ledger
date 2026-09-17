@@ -133,11 +133,20 @@ export function testConfig(overrides: Partial<ReplayConfig> = {}): ReplayConfig 
 }
 
 /** Policy that rests fixed quotes whenever a book is available; optional pull from a given tick. */
-export function fixedQuotePolicy(opts: { bid?: string; ask?: string; qty?: string; pullFromTick?: number; holdUntilTick?: number }): ScriptedPolicy {
+export function fixedQuotePolicy(opts: {
+  bid?: string;
+  ask?: string;
+  qty?: string;
+  pullFromTick?: number;
+  /** Pull on exactly these ticks, quote again afterwards. */
+  pullTicks?: number[];
+  holdUntilTick?: number;
+}): ScriptedPolicy {
   const qty = parseQty(opts.qty ?? '1');
   return new ScriptedPolicy((input: PolicyInput): PolicyDecision => {
     if (opts.holdUntilTick !== undefined && input.tick < opts.holdUntilTick) return { intent: 'hold', bid: null, ask: null, reason: 'scripted hold' };
     if (opts.pullFromTick !== undefined && input.tick >= opts.pullFromTick) return { intent: 'pull', bid: null, ask: null, reason: 'scripted pull' };
+    if (opts.pullTicks?.includes(input.tick)) return { intent: 'pull', bid: null, ask: null, reason: 'scripted pull' };
     if (!input.book) return { intent: 'hold', bid: null, ask: null, reason: 'no book' };
     return {
       intent: 'quote',

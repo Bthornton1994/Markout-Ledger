@@ -16,13 +16,16 @@ describe('observation stream validation', () => {
     );
     const r = await replay({ fixture: fx, policy: new NoTradePolicy(), controller: null, config: testConfig({ steering: 'disabled' }) });
     const rejected = r.ledger.ofType('observation_rejected');
-    expect(rejected.map((e) => [e.eventId, e.reason])).toEqual([
-      ['dup', 'duplicate_event'],
-      ['late', 'out_of_order'],
-      ['neg', 'invalid_timestamps'],
+    // Each rejection is logged when the event is encountered in stream order, never earlier:
+    // the duplicate at its own obsTime, the out-of-order event when the stream has already moved to t=300,
+    // the impossible-timestamp event at its (valid) obsTime of 350.
+    expect(rejected.map((e) => [e.eventId, e.reason, e.phase, e.simTime - T0])).toEqual([
+      ['dup', 'duplicate_event', 'structural', 100],
+      ['late', 'out_of_order', 'structural', 300],
+      ['neg', 'invalid_timestamps', 'content', 350],
     ]);
+    expect(rejected.every((e) => e.encounteredAt === e.simTime)).toBe(true);
     expect(r.summary.observations.accepted).toBe(2);
-    expect(rejected.every((e) => e.phase === 'structural')).toBe(true);
   });
 
   it('rejects stale observations at processing time and the policy never sees them', async () => {

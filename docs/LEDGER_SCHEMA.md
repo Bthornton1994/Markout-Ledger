@@ -22,7 +22,7 @@ Run lifecycle
 Observations
 
 - `observation`: an accepted observation in compact form (top of book or the print), with `obsTime`, `marketTime`, `feedLagMs`.
-- `observation_rejected`: `reason`, `detail`, `phase` (see EVENT_SCHEMA.md).
+- `observation_rejected`: `reason`, `detail`, `phase`, `encounteredAt` (see EVENT_SCHEMA.md). Appended when the event is encountered in stream order, so `simTime` is never earlier than the decisions that preceded the event.
 
 Fast policy
 
@@ -33,18 +33,20 @@ Orders and execution (one entry per state transition)
 - `order_proposed`: the policy's desired quote after reconciling with resting orders.
 - `order_rejected`: `rejectedBy: risk_gate | venue`, `reason`, `detail`. Risk reasons: `kill_switch_active`, `order_size_limit`, `invalid_qty`, `invalid_price`, `position_limit`. Venue reasons: `post_only_would_cross`, `no_book`.
 - `order_submitted`: `orderId`, `expectedLiveAt`, `placementCost`.
-- `order_live`: `liveAt`, `queueAhead`, `queueSource`, the book event used, and the fill-uncertainty note.
+- `order_live`: `liveAt` (venue time), `queueAhead`, `queueSource`, the book event used with its `bookMarketTime` and `bookLagMs`, and the fill-uncertainty note.
 - `cancel_requested`: `expectedEffectiveAt`, `cancelCost`, reason (`requote | withdraw | pull | kill_switch`).
-- `cancel_effective`, `cancel_too_late` (`already_filled | already_cancelled | already_rejected`).
-- `cancel_fill_race`: a trade filled an order whose cancel was pending; `outcome: fill_wins` and the rule.
-- `fill`: `fillId`, qty, price, notional, fee, `isPartial`, `fillType` (`trade_through | queue_exhausted`), `queueAheadBefore`, the trade that caused it, `realizedDelta`, `inventoryAfter`, `cashAfter`.
+- `cancel_effective` (with `finalAt`: until then the cancel is provisional and a late fill can still arrive), `cancel_too_late` (`already_filled | already_cancelled | already_rejected`).
+- `cancel_fill_race`: a trade filled an order with a cancel in flight or already effective; `outcome: fill_wins_before_cancel | fill_wins_tie | late_fill_after_cancel_effective`, `tradeMarketTime`, `tradeObsTime`, and the rule.
+- `fill`: `fillId`, qty, price, notional, fee, `isPartial`, `fillType` (`trade_through | queue_exhausted`), `queueAheadBefore`, the trade that caused it with `tradeMarketTime` (venue time of the fill) and `observedAt` (when it was booked, == `simTime`), `duringCancelPending`, `afterCancelEffective`, `realizedDelta`, `inventoryAfter`, `cashAfter`.
+- `fill_ineligible`: a print at or through our price that could not have filled us on venue time; `reason: predates_activation | at_activation_instant | after_cancellation`, both trade timestamps, `orderLiveAt`, `cancelEffectiveAt`.
+- `fill_uncertain`: an eligible print observed after the order was finalized; no fill awarded; `reason: observed_after_finalization`, `finalAt`.
 - `queue_consumed`: a print at our price was absorbed by the displayed queue ahead of us; no fill awarded.
 - `tx_cost`: `kind: placement | cancel`, amount, `cashAfter`.
 
 Outcomes and risk
 
-- `outcome`: markout of a fill at `horizonMs`, measured at `availableAt = fillTime + horizonMs` against the latest valid mid; `status: measured | unmeasurable_no_book`.
-- `risk_breach`: the loss-limit kill switch tripped; net P&L, limit, action taken.
+- `outcome`: markout of a fill at `horizonMs`. The horizon runs on venue time: `availableAt = max(fillMarketTime + horizonMs, fillObservedAt)`. The mid is the latest observed book whose `marketTime` does not exceed the horizon (`midSelection: venue_time`; `midMarketTime`, `midObsTime`, `midEventId`), falling back to the latest observed book if none qualifies; `status: measured | unmeasurable_no_book`.
+- `risk_breach`: `kind: loss_limit` (kill switch tripped) or `position_overrun` (a fill, typically a late fill on a provisionally cancelled order, pushed inventory past the position limit; no kill switch, increasing orders are rejected from then on).
 
 Slow controller
 
@@ -57,4 +59,4 @@ Slow controller
 
 ## Rebuilding state from the ledger
 
-The reconciliation test (`tests/engine.test.ts`, "net P&L reconciles") shows the pattern: fold `fill` and `tx_cost` entries to rebuild cash, inventory, fees, transaction costs and gross realized P&L, then compare with the summary. Every order's lifecycle is the sequence `order_proposed -> (order_rejected | order_submitted -> (order_rejected | order_live -> fill* -> (fill(final) | cancel_effective)))` and can be reassembled by `orderId`.
+The reconciliation test (`tests/engine.test.ts`, "net P&L reconciles") shows the pattern: fold `fill` and `tx_cost` entries to rebuild cash, inventory, fees, transaction costs and gross realized P&L, then compare with the summary. Every order's lifecycle is the sequence `order_proposed -> (order_rejected | order_submitted -> (order_rejected | order_live -> fill* -> (fill(final) | cancel_effective -> fill(afterCancelEffective)*)))` and can be reassembled by `orderId`. A `cancel_effective` is provisional until its `finalAt`.

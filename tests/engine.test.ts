@@ -123,7 +123,7 @@ describe('outcomes are unavailable until their measurement horizon has elapsed',
     expect(w1.outcomes.pendingAtWindowEnd).toBe(0);
 
     const outcomes = r.ledger.ofType('outcome');
-    expect(outcomes.map((o) => [o.horizonMs, o.availableAt - o.fillTime, o.simTime === o.availableAt])).toEqual([
+    expect(outcomes.map((o) => [o.horizonMs, o.availableAt - o.fillMarketTime, o.simTime === o.availableAt])).toEqual([
       [1000, 1000, true],
       [3000, 3000, true],
     ]);
@@ -421,13 +421,158 @@ describe('touch vs fill and races at engine level', () => {
     expect(before.ledger.ofType('cancel_fill_race')).toHaveLength(1);
     expect(before.ledger.ofType('cancel_too_late').map((c) => c.reason)).toEqual(['already_filled']);
     expect(tie.summary.fills.count).toBe(1);
-    expect(tie.ledger.ofType('cancel_fill_race')[0]!.outcome).toBe('fill_wins');
+    expect(tie.ledger.ofType('cancel_fill_race')[0]!.outcome).toBe('fill_wins_tie');
+    expect(before.ledger.ofType('cancel_fill_race')[0]!.outcome).toBe('fill_wins_before_cancel');
     expect(after.summary.fills.count).toBe(0);
     expect(after.ledger.ofType('cancel_effective')).toHaveLength(1);
     for (const r of [before, tie, after]) {
       const terminal = r.ledger.all().filter((e) => e.type === 'cancel_effective' || (e.type === 'fill' && !e.isPartial) || e.type === 'order_rejected');
       expect(terminal).toHaveLength(1);
       expect((await run(r === before ? 930 : r === tie ? 950 : 951)).ledger.headHash).toBe(r.ledger.headHash);
+    }
+  });
+});
+
+describe('venue-time fill eligibility inside the replay', () => {
+  // Books every 100 ms with zero feed lag; the scripted policy rests a bid at 99.90 from tick 0 (live at t=50).
+  const books = flatBooks(0, 3000, '100.00', '100.02');
+
+  it('a trade that predates activation but arrives afterwards cannot fill; later prints fill at observation time', async () => {
+    const fx = makeFixture(
+      [
+        ...books,
+        trade(30, '99.80', '0.4', 'sell', { lag: 40 }), // printed 30 (< liveAt 50), observed 70 (order live by then)
+        trade(60, '99.80', '0.3', 'sell', { lag: 40 }), // printed 60, observed 100
+        trade(940, '99.80', '0.2', 'sell', { lag: 100 }), // printed before the cancel takes effect at 950, observed 1040
+        trade(960, '99.80', '0.2', 'sell', { lag: 100 }), // printed after the cancel took effect
+      ],
+      { durationMs: 3000 },
+    );
+    const policy = fixedQuotePolicy({ bid: '99.90', qty: '1', pullFromTick: 3 }); // pull at t=900 -> cancel effective 950
+    const r = await replay({ fixture: fx, policy, controller: null, config: testConfig({ steering: 'disabled' }) });
+
+    const fills = r.ledger.ofType('fill');
+    expect(fills.map((f) => [f.simTime - T0, f.tradeMarketTime - T0, f.qty, f.afterCancelEffective])).toEqual([
+      [100, 60, '0.300000', false],
+      [1040, 940, '0.200000', true],
+    ]);
+    expect(fills.every((f) => f.observedAt === f.simTime)).toBe(true);
+    const inel = r.ledger.ofType('fill_ineligible');
+    expect(inel.map((e) => [e.simTime - T0, e.tradeMarketTime - T0, e.reason])).toEqual([
+      [70, 30, 'predates_activation'],
+      [1060, 960, 'after_cancellation'],
+    ]);
+    expect(r.ledger.ofType('cancel_fill_race').map((c) => c.outcome)).toEqual(['late_fill_after_cancel_effective']);
+    expect(r.summary.fills).toMatchObject({ count: 2, lateAfterCancel: 1, ineligible: 2, uncertain: 0 });
+
+    // the strategy learns about each fill at its observation time, not before
+    const decisions = r.ledger.ofType('policy_decision');
+    const invAt = (t: number) => decisions.find((d) => d.simTime === T0 + t)!.input.inventory;
+    expect(invAt(0)).toBe('0.000000');
+    expect(invAt(300)).toBe('0.300000');
+    expect(invAt(900)).toBe('0.300000');
+    expect(invAt(1200)).toBe('0.500000');
+
+    // outcomes run on venue time and cannot precede the observation of the fill
+    const outcomes = r.ledger.ofType('outcome').filter((o) => o.horizonMs === 1000);
+    expect(outcomes.map((o) => [o.fillMarketTime - T0, o.fillObservedAt - T0, o.availableAt - T0, o.midSelection])).toEqual([
+      [60, 100, 1060, 'venue_time'],
+      [940, 1040, 1940, 'venue_time'],
+    ]);
+    expect(outcomes.every((o) => o.midMarketTime! <= o.fillMarketTime + o.horizonMs)).toBe(true);
+
+    // accounting identity still holds with late fills
+    const p = r.summary.portfolio;
+    expect(parseMoney(p.netPnl)).toBe(parseMoney(p.grossRealized) + parseMoney(p.unrealized) - parseMoney(p.feesPaid) - parseMoney(p.txCostsPaid));
+  });
+
+  it('a late fill on a provisionally cancelled order can overrun the position limit; it is logged and further increases are blocked', async () => {
+    const fx = makeFixture(
+      [
+        ...books,
+        trade(60, '99.80', '0.3', 'sell', { lag: 40 }), // fills 0.3 of order 1 at obs 100
+        trade(940, '99.80', '0.7', 'sell', { lag: 360 }), // printed while order 1 was live, observed at 1300 after its cancel (950)
+        trade(1300, '99.80', '1', 'sell'), // fills order 2 (live at 1250)
+      ],
+      { durationMs: 3000 },
+    );
+    const policy = fixedQuotePolicy({ bid: '99.90', qty: '1', pullTicks: [3] }); // pull only at t=900, requote from t=1200
+    const cfg = testConfig({ steering: 'disabled', risk: { ...testConfig().risk, maxPosition: parseQty('1.5'), maxOrderQty: parseQty('1') } });
+    const r = await replay({ fixture: fx, policy, controller: null, config: cfg });
+
+    const fills = r.ledger.ofType('fill');
+    expect(fills.map((f) => [f.orderId, f.simTime - T0, f.qty, f.afterCancelEffective])).toEqual([
+      ['o1', 100, '0.300000', false],
+      ['o1', 1300, '0.700000', true],
+      ['o2', 1300, '1.000000', false],
+    ]);
+    expect(parseQty(r.summary.portfolio.inventory)).toBe(parseQty('2'));
+    const overruns = r.ledger.ofType('risk_breach').filter((b) => b.kind === 'position_overrun');
+    expect(overruns).toHaveLength(1);
+    expect(overruns[0]!.simTime).toBe(T0 + 1300);
+    expect(r.summary.risk.positionOverruns).toBe(1);
+    // the next proposal is blocked by the position limit; nothing else is submitted
+    const later = r.ledger.all().filter((e) => e.simTime > T0 + 1300);
+    expect(later.some((e) => e.type === 'order_rejected' && e.reason === 'position_limit')).toBe(true);
+    expect(later.some((e) => e.type === 'order_submitted')).toBe(false);
+  });
+});
+
+describe('chronological ledger: a bad event later in the stream leaves no earlier trace', () => {
+  const cutoff = T0 + 15_000;
+  const prefix = (entries: readonly LedgerEntry[]) => entries.filter((e) => e.type !== 'replay_started' && e.simTime <= cutoff).map(stripHashes);
+
+  it('a future event that is malformed is rejected at its own observation time', async () => {
+    const base = await runScenario('baseline', 'steered');
+    const idx = baselineFixture.events.findIndex((e) => e.type === 'book' && e.obsTime > cutoff + 3000);
+    const target = baselineFixture.events[idx]! as Extract<Fixture['events'][number], { type: 'book' }>;
+    const crossed: Fixture = {
+      ...baselineFixture,
+      events: baselineFixture.events.map((e, i) => (i === idx ? { ...target, bids: target.bids.map((l) => ({ ...l, price: l.price + 1_000_000n })) } : e)),
+    };
+    const r = await runScenario('baseline', 'steered', crossed);
+    expect(prefix(r.ledger.all())).toEqual(prefix(base.ledger.all()));
+    const rej = r.ledger.ofType('observation_rejected');
+    expect(rej.map((x) => [x.eventId, x.reason, x.simTime, x.encounteredAt])).toEqual([[target.eventId, 'crossed_book', target.obsTime, target.obsTime]]);
+    expect(rej[0]!.simTime).toBeGreaterThan(cutoff);
+    // nothing about the bad event precedes the decisions taken before it arrived
+    const firstDecisionAfter = r.ledger.ofType('policy_decision').find((d) => d.simTime > target.obsTime)!;
+    expect(rej[0]!.ledgerSeq).toBeLessThan(firstDecisionAfter.ledgerSeq);
+    expect(r.ledger.all().filter((e) => e.simTime < target.obsTime).some((e) => e.type === 'observation_rejected')).toBe(false);
+  });
+
+  it('a future event that arrives out of order is rejected when encountered, after the stream has passed it', async () => {
+    const base = await runScenario('baseline', 'steered');
+    const idx = baselineFixture.events.findIndex((e) => e.obsTime > cutoff + 3000);
+    const target = baselineFixture.events[idx]!;
+    const prev = baselineFixture.events[idx - 1]!;
+    const newObs = target.obsTime - 1500;
+    const moved: Fixture = {
+      ...baselineFixture,
+      events: baselineFixture.events.map((e, i) => (i === idx ? { ...e, obsTime: newObs, marketTime: Math.min(e.marketTime, newObs) } : e)),
+    };
+    const r = await runScenario('baseline', 'steered', moved);
+    expect(prefix(r.ledger.all())).toEqual(prefix(base.ledger.all()));
+    const rej = r.ledger.ofType('observation_rejected');
+    expect(rej.map((x) => [x.eventId, x.reason])).toEqual([[target.eventId, 'out_of_order']]);
+    // logged at the stream position it was encountered at (the previous event's obsTime), never at replay start
+    expect(rej[0]!.simTime).toBe(prev.obsTime);
+    expect(rej[0]!.encounteredAt).toBe(prev.obsTime);
+    expect(rej[0]!.obsTime).toBe(newObs);
+    expect(rej[0]!.simTime).toBeGreaterThan(rej[0]!.obsTime);
+    expect(r.summary.observations.accepted).toBe(base.summary.observations.accepted - 1);
+  });
+
+  it('every rejection in the shipped fixtures and their variants is logged no earlier than the event itself', async () => {
+    for (const r of [await runScenario('baseline', 'steered'), await runScenario('riskgate', 'unsteered')]) {
+      for (const rej of r.ledger.ofType('observation_rejected')) {
+        expect(rej.simTime).toBeGreaterThanOrEqual(Math.min(rej.obsTime, rej.encounteredAt));
+        expect(rej.simTime).toBe(rej.encounteredAt);
+      }
+      // only events observed after the replay end are never reached
+      const fx = r.summary.fixture.seed === 42 ? baselineFixture : riskFixture;
+      const end = fx.header.startTime + r.summary.windows * r.summary.windowMs;
+      expect(r.summary.observations.notReached).toBe(fx.events.filter((e) => e.obsTime > end).length);
     }
   });
 });

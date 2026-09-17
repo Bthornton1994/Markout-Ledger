@@ -120,6 +120,8 @@ async function cmdReplay(flags: Record<string, string | boolean>): Promise<void>
       { header: 'netPnl', get: (r) => dec(r.summary.portfolio.netPnl, 4), align: 'right' },
       { header: 'inv(end)', get: (r) => dec(r.summary.portfolio.inventory, 3), align: 'right' },
       { header: 'maxAbsInv', get: (r) => dec(r.summary.portfolio.maxAbsInventory, 3), align: 'right' },
+      { header: 'lateFill', get: (r) => String(r.summary.fills.lateAfterCancel), align: 'right' },
+      { header: 'preLive', get: (r) => String(r.summary.fills.ineligibleByReason.predatesActivation + r.summary.fills.ineligibleByReason.atActivationInstant), align: 'right' },
       { header: 'rejRisk', get: (r) => String(r.summary.orders.rejectedByRisk), align: 'right' },
       { header: 'kill', get: (r) => (r.summary.risk.killSwitchTripped ? 'yes' : 'no') },
       { header: 'instr', get: (r) => `v${r.summary.instructions.finalVersion}` },
@@ -167,6 +169,11 @@ async function cmdReplay(flags: Record<string, string | boolean>): Promise<void>
     }
   }
   console.log(`Fill model: ${steered.summary.fillUncertainty.model}; trades at our price absorbed by queue ahead (no fill): steered=${steered.summary.fillUncertainty.queueConsumedWithoutFill}, unsteered=${results['unsteered']!.summary.fillUncertainty.queueConsumedWithoutFill}`);
+  const vt = (r: ReplayResult) => {
+    const f = r.summary.fills;
+    return `${f.ineligibleByReason.predatesActivation + f.ineligibleByReason.atActivationInstant} pre-activation prints ignored, ${f.ineligibleByReason.afterCancellation} post-cancel near misses, ${f.lateAfterCancel} late fills after cancel, ${f.uncertain} unresolvable`;
+  };
+  console.log(`Venue-time eligibility: steered: ${vt(steered)}; unsteered: ${vt(results['unsteered']!)}`);
   console.log('');
 
   const resultsPath = join(outDir, 'results.json');

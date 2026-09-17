@@ -44,13 +44,14 @@ function mkBook(t: number, bid: string, ask: string, bidSize = '2', askSize = '2
   };
 }
 
-function mkTrade(t: number, price: string, size: string, aggressor: 'buy' | 'sell' | 'unknown' = 'unknown'): TradeEvent {
+/** `t` is the observation offset; `marketOffset` (default = t) is the venue time offset. */
+function mkTrade(t: number, price: string, size: string, aggressor: 'buy' | 'sell' | 'unknown' = 'unknown', marketOffset: number = t): TradeEvent {
   return {
     type: 'trade',
-    eventId: `t${t}`,
+    eventId: `t${t}-${marketOffset}`,
     seq: 1000 + t,
     obsTime: T0 + t,
-    marketTime: T0 + t,
+    marketTime: T0 + marketOffset,
     symbol: 'X',
     venue: 'test',
     tradeId: `t${t}`,
@@ -65,7 +66,7 @@ function harness() {
   const scheduler = new Scheduler();
   const events: ExecutionEvent[] = [];
   let book: BookEvent | null = null;
-  const ex = new PaperExchange(cfg, scheduler, (e) => events.push(e), () => book);
+  const ex = new PaperExchange(cfg, scheduler, (e) => events.push(e), () => book, { maxTradeLagMs: 500 });
   const feedBook = (b: BookEvent) => scheduler.schedule(b.obsTime, Priority.MARKET, () => void (book = b));
   const feedTrade = (t: TradeEvent) => scheduler.schedule(t.obsTime, Priority.MARKET, () => ex.onTrade(t, t.obsTime));
   const at = (t: number, priority: number, fn: () => void) => scheduler.schedule(T0 + t, priority, fn);
@@ -215,11 +216,13 @@ describe('paper execution model', () => {
       expect(h.ex.get('o1')!.state).toBe('filled');
     });
 
-    it('trade after the cancel takes effect: no fill', () => {
+    it('trade after the cancel takes effect: no fill, recorded as ineligible', () => {
       const h = race(451);
       expect(h.fills()).toHaveLength(0);
       expect(h.kinds()).toContain('cancel_effective');
       expect(h.ex.get('o1')!.state).toBe('cancelled');
+      const inel = h.events.filter((e): e is Extract<ExecutionEvent, { kind: 'fill_ineligible' }> => e.kind === 'fill_ineligible');
+      expect(inel.map((e) => e.reason)).toEqual(['after_cancellation']);
     });
 
     it('is deterministic: identical inputs produce identical event sequences', () => {
@@ -240,6 +243,123 @@ describe('paper execution model', () => {
       expect(h.fills()).toHaveLength(0);
       expect(h.ex.get('o1')!.state).toBe('cancelled');
       expect(h.ex.get('o1')!.cancelEffectiveAt).toBe(T0 + 150);
+    });
+  });
+
+  describe('venue-time eligibility (marketTime vs obsTime)', () => {
+    /** Order submitted at 100 -> live at 150 (venue). Optional cancel at 400 -> effective 450, final at 950. */
+    function setup(opts: { cancel?: boolean; bidSize?: string } = {}) {
+      const h = harness();
+      h.feedBook(mkBook(0, '99.90', '99.92', opts.bidSize ?? '0'));
+      h.at(100, Priority.TICK, () => h.ex.submit({ clientId: 'c', side: 'buy', price: parsePrice('99.90'), qty: parseQty('1') }, T0 + 100));
+      if (opts.cancel) h.at(400, Priority.TICK, () => h.ex.requestCancel('o1', T0 + 400, 'test'));
+      return h;
+    }
+    const ineligible = (h: ReturnType<typeof harness>) =>
+      h.events.filter((e): e is Extract<ExecutionEvent, { kind: 'fill_ineligible' }> => e.kind === 'fill_ineligible').map((e) => e.reason);
+    const uncertain = (h: ReturnType<typeof harness>) =>
+      h.events.filter((e): e is Extract<ExecutionEvent, { kind: 'fill_uncertain' }> => e.kind === 'fill_uncertain').map((e) => e.reason);
+
+    it('a trade printed before activation but observed after it cannot fill', () => {
+      const h = setup();
+      h.feedTrade(mkTrade(200, '99.80', '1', 'sell', 120)); // observed at 200 (order live), printed at 120 (< liveAt 150)
+      h.run();
+      expect(h.fills()).toHaveLength(0);
+      expect(ineligible(h)).toEqual(['predates_activation']);
+      expect(h.ex.get('o1')!.state).toBe('live');
+    });
+
+    it('a trade printed at the activation instant is not awarded and is recorded as uncertain', () => {
+      const h = setup();
+      h.feedTrade(mkTrade(200, '99.80', '1', 'sell', 150));
+      h.run();
+      expect(h.fills()).toHaveLength(0);
+      expect(ineligible(h)).toEqual(['at_activation_instant']);
+    });
+
+    it('a trade printed after activation fills when observed, booking at observation time', () => {
+      const h = setup();
+      h.feedTrade(mkTrade(400, '99.80', '1', 'sell', 151));
+      h.run();
+      const f = h.fills();
+      expect(f).toHaveLength(1);
+      expect(f[0]!.at).toBe(T0 + 400);
+      expect(f[0]!.trade.marketTime).toBe(T0 + 151);
+      expect(f[0]!.afterCancelEffective).toBe(false);
+    });
+
+    it('ineligible prints do not consume the queue ahead of us', () => {
+      const h = setup({ bidSize: '2' });
+      h.feedTrade(mkTrade(200, '99.90', '1.5', 'sell', 120)); // at our price, predates activation
+      h.run();
+      expect(h.ex.get('o1')!.queueAhead).toBe(parseQty('2'));
+      expect(h.kinds()).not.toContain('queue_consumed');
+      expect(ineligible(h)).toEqual(['predates_activation']);
+    });
+
+    it('a trade printed while live but observed after the cancel took effect is a late fill', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(600, '99.80', '0.4', 'sell', 440)); // printed before cancelEffectiveAt 450, observed at 600
+      h.run();
+      expect(h.kinds()).toContain('cancel_effective');
+      const f = h.fills();
+      expect(f).toHaveLength(1);
+      expect(f[0]!.afterCancelEffective).toBe(true);
+      expect(f[0]!.qty).toBe(parseQty('0.4'));
+      expect(f[0]!.at).toBe(T0 + 600);
+      const races = h.events.filter((e): e is Extract<ExecutionEvent, { kind: 'cancel_fill_race' }> => e.kind === 'cancel_fill_race');
+      expect(races.map((r) => r.outcome)).toEqual(['late_fill_after_cancel_effective']);
+      const o = h.ex.get('o1')!;
+      expect(o.state).toBe('cancelled');
+      expect(o.lateFilledQty).toBe(parseQty('0.4'));
+      expect(o.finalAt).toBe(T0 + 950);
+    });
+
+    it('a trade printed at the cancel instant and observed later still fills (fill wins the tie)', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(500, '99.80', '1', 'sell', 450));
+      h.run();
+      expect(h.fills()).toHaveLength(1);
+      expect(h.fills()[0]!.afterCancelEffective).toBe(true);
+    });
+
+    it('a trade printed after the cancel took effect never fills, however early it is observed', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(500, '99.80', '1', 'sell', 460));
+      h.run();
+      expect(h.fills()).toHaveLength(0);
+      expect(ineligible(h)).toEqual(['after_cancellation']);
+    });
+
+    it('an eligible print observed after finalization is recorded as uncertain, not awarded', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(1000, '99.80', '1', 'sell', 440)); // finalAt = 450 + 500 = 950 < 1000
+      h.run();
+      expect(h.fills()).toHaveLength(0);
+      expect(uncertain(h)).toEqual(['observed_after_finalization']);
+      expect(h.ex.get('o1')!.filledQty).toBe(0n);
+    });
+
+    it('a finalized order is not re-evaluated against ordinary later prints', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(1200, '99.80', '1', 'sell', 1190)); // long after finalAt 950, ordinary lag
+      h.feedTrade(mkTrade(1300, '99.90', '1', 'sell', 1290));
+      h.run();
+      expect(h.fills()).toHaveLength(0);
+      expect(ineligible(h)).toEqual([]);
+      expect(uncertain(h)).toEqual([]);
+      expect(h.kinds().filter((k) => k === 'queue_consumed')).toEqual([]);
+    });
+
+    it('late fills respect the remaining quantity and stop once the order is exhausted', () => {
+      const h = setup({ cancel: true });
+      h.feedTrade(mkTrade(600, '99.80', '0.7', 'sell', 440));
+      h.feedTrade(mkTrade(610, '99.80', '0.7', 'sell', 445));
+      h.feedTrade(mkTrade(620, '99.80', '0.7', 'sell', 446));
+      h.run();
+      expect(h.fills().map((f) => f.qty)).toEqual([parseQty('0.7'), parseQty('0.3')]);
+      expect(h.ex.get('o1')!.filledQty).toBe(parseQty('1'));
+      expect(h.ex.get('o1')!.lateFilledQty).toBe(parseQty('1'));
     });
   });
 

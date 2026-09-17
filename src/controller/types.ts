@@ -61,6 +61,10 @@ export interface WindowReview {
     sellFillQty: Decimal;
     partialFills: number;
     queueConsumedWithoutFill: number;
+    /** Fills observed after the order's cancel took effect (printed while it was still live). */
+    lateFillsAfterCancel: number;
+    /** Prints at our price that could not have filled us on venue time (predate activation, follow cancellation). */
+    fillsIneligible: number;
   };
   outcomes: {
     horizonsMs: number[];

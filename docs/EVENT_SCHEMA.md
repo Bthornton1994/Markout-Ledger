@@ -11,7 +11,7 @@ Every observation carries two timestamps, in integer milliseconds:
 | `marketTime` | when the event happened at the venue (exchange timestamp, or block time for on-chain venues) |
 | `obsTime` | when a strategy running against this feed could first have seen it (local receive time) |
 
-The engine gates **everything** on `obsTime`. A policy tick at simulated time `t` sees only observations with `obsTime <= t`. `marketTime` is recorded for analysis (feed lag, block alignment) and for the staleness check, never for decision timing. `obsTime < marketTime` is invalid. Optional `blockNumber` is carried for on-chain sources.
+The engine gates **knowledge** on `obsTime`: a policy tick at simulated time `t` sees only observations with `obsTime <= t`, and a fill is booked when the trade that caused it is observed. `marketTime` decides **execution eligibility**: a trade can only fill an order that was resting on the venue's book at the trade's venue time (see EXECUTION_MODEL.md, "Time semantics"), and fill outcomes (markouts) run their horizon on venue time. The two clocks are assumed to share a time base, with `marketTime <= obsTime`; `obsTime < marketTime` is invalid. Optional `blockNumber` is carried for on-chain sources.
 
 Synthetic fixtures use a fixed, obviously artificial epoch (2000-01-01T00:00:00Z = `946684800000`), with `obsTime = marketTime + modeled feed latency`.
 
@@ -56,18 +56,18 @@ The file order is authoritative: `seq` must be strictly increasing and `obsTime`
 
 ## Validation and rejection
 
-Structural checks run over the file before replay; content checks run when the event is processed. Rejected events are logged in the ledger as `observation_rejected` with a `phase` and one of:
+The engine consumes the fixture lazily, in file order, and validates each event **when it is encountered**, so the ledger stays chronological: a bad event late in the file cannot leave any trace before the decisions that preceded it. Two checks happen when an event is pulled from the stream (`outside_replay_range` for events before the replay start, `out_of_order` when its `obsTime` precedes the stream position; both logged at the current simulated time), everything else when the event is processed at its own `obsTime`. Every rejection carries `encounteredAt` (equal to its `simTime`). Rejected events are logged as `observation_rejected` with a `phase` (`structural` for identity/ordering, `content` for the event itself) and one of:
 
 | reason | phase | condition |
 |---|---|---|
-| `duplicate_event` | structural | `eventId` already seen |
-| `non_increasing_seq` | structural | `seq` not greater than the previous event's |
-| `out_of_order` | structural | `obsTime` earlier than the previous event's |
-| `invalid_timestamps` | structural | `obsTime < marketTime` or non-integer timestamps |
-| `malformed_event` | structural | non-positive price/size, unsorted levels, bad aggressor |
-| `crossed_book` | structural | best bid >= best ask |
-| `wrong_symbol` | structural | symbol differs from the header |
-| `outside_replay_range` | structural | `obsTime` outside `[startTime, startTime + windows * windowMs]` |
+| `duplicate_event` | structural | `eventId` already seen (logged at the event's obsTime) |
+| `non_increasing_seq` | structural | `seq` not greater than the previous event's (at the event's obsTime) |
+| `out_of_order` | structural | `obsTime` earlier than the stream position (at the time it is encountered) |
+| `outside_replay_range` | structural | `obsTime` before `startTime` (at replay start) |
+| `invalid_timestamps` | content | `obsTime < marketTime` or non-integer timestamps |
+| `malformed_event` | content | non-positive price/size, unsorted levels, bad aggressor |
+| `crossed_book` | content | best bid >= best ask |
+| `wrong_symbol` | content | symbol differs from the header |
 | `stale_observation` | content | `obsTime - marketTime > maxStalenessMs` (default 500 ms) |
 
-A rejected observation is never shown to the policy, never updates the book used for fills or marks, and never fills an order. Separately, the market-making policy pulls its quotes when its latest valid book is older than `maxBookAgeMs` (default 1000 ms).
+Events observed after the replay end are never reached; the summary reports them as `observations.notReached`. A rejected observation is never shown to the policy, never updates the book used for fills or marks, and never fills an order. Separately, the market-making policy pulls its quotes when its latest valid book is older than `maxBookAgeMs` (default 1000 ms).
