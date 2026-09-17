@@ -171,7 +171,7 @@ async function cmdReplay(flags: Record<string, string | boolean>): Promise<void>
   console.log(`Fill model: ${steered.summary.fillUncertainty.model}; trades at our price absorbed by queue ahead (no fill): steered=${steered.summary.fillUncertainty.queueConsumedWithoutFill}, unsteered=${results['unsteered']!.summary.fillUncertainty.queueConsumedWithoutFill}`);
   const vt = (r: ReplayResult) => {
     const f = r.summary.fills;
-    return `${f.ineligibleByReason.predatesActivation + f.ineligibleByReason.atActivationInstant} pre-activation prints ignored, ${f.ineligibleByReason.afterCancellation} post-cancel near misses, ${f.lateAfterCancel} late fills after cancel, ${f.uncertain} unresolvable`;
+    return `${f.ineligibleByReason.predatesActivation + f.ineligibleByReason.atActivationInstant} pre-activation prints ignored, ${f.ineligibleByReason.afterCancellation} post-cancel near misses, ${f.reordered} fills released by venue re-ordering, ${f.lateAfterCancel} late fills after cancel, ${f.uncertain} stale prints discarded while eligible`;
   };
   console.log(`Venue-time eligibility: steered: ${vt(steered)}; unsteered: ${vt(results['unsteered']!)}`);
   console.log('');

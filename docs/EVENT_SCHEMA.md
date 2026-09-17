@@ -68,6 +68,6 @@ The engine consumes the fixture lazily, in file order, and validates each event 
 | `malformed_event` | content | non-positive price/size, unsorted levels, bad aggressor |
 | `crossed_book` | content | best bid >= best ask |
 | `wrong_symbol` | content | symbol differs from the header |
-| `stale_observation` | content | `obsTime - marketTime > maxStalenessMs` (default 500 ms) |
+| `stale_observation` | content | `obsTime - marketTime > maxStalenessMs` (default 500 ms); a discarded print eligible for one of our orders also yields `fill_uncertain` |
 
 Events observed after the replay end are never reached; the summary reports them as `observations.notReached`. A rejected observation is never shown to the policy, never updates the book used for fills or marks, and never fills an order. Separately, the market-making policy pulls its quotes when its latest valid book is older than `maxBookAgeMs` (default 1000 ms).

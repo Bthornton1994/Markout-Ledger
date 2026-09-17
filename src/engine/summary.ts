@@ -56,10 +56,13 @@ export interface RunSummary {
     partial: number;
     tradeThrough: number;
     queueExhausted: number;
+    /** Fills released by re-ordering earlier-observed prints into venue order. */
+    reordered: number;
     lateAfterCancel: number;
     /** Prints at our price that could not have filled us on venue time, by reason. */
     ineligible: number;
     ineligibleByReason: { predatesActivation: number; atActivationInstant: number; afterCancellation: number };
+    /** Stale-discarded prints that were eligible for one of our orders; nothing awarded, doubt recorded. */
     uncertain: number;
   };
   fillUncertainty: { model: string; note: string; queueConsumedWithoutFill: number };

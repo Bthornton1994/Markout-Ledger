@@ -37,10 +37,10 @@ Orders and execution (one entry per state transition)
 - `cancel_requested`: `expectedEffectiveAt`, `cancelCost`, reason (`requote | withdraw | pull | kill_switch`).
 - `cancel_effective` (with `finalAt`: until then the cancel is provisional and a late fill can still arrive), `cancel_too_late` (`already_filled | already_cancelled | already_rejected`).
 - `cancel_fill_race`: a trade filled an order with a cancel in flight or already effective; `outcome: fill_wins_before_cancel | fill_wins_tie | late_fill_after_cancel_effective`, `tradeMarketTime`, `tradeObsTime`, and the rule.
-- `fill`: `fillId`, qty, price, notional, fee, `isPartial`, `fillType` (`trade_through | queue_exhausted`), `queueAheadBefore`, the trade that caused it with `tradeMarketTime` (venue time of the fill) and `observedAt` (when it was booked, == `simTime`), `duringCancelPending`, `afterCancelEffective`, `realizedDelta`, `inventoryAfter`, `cashAfter`.
+- `fill`: `fillId`, qty, price, notional, fee, `isPartial`, `fillType` (`trade_through | queue_exhausted | reordered`), `queueAheadBefore`, the print whose observation established it (`tradeEventId`, `tradeMarketTime` = venue time, `observedAt` = when it was booked, == `simTime`), `venueOrderContribution` (what that print fills on its own in venue order) and `reorderAdjustmentQty` (quantity released or absorbed by re-ordering earlier-observed prints), `duringCancelPending`, `afterCancelEffective`, `realizedDelta`, `inventoryAfter`, `cashAfter`.
 - `fill_ineligible`: a print at or through our price that could not have filled us on venue time; `reason: predates_activation | at_activation_instant | after_cancellation`, both trade timestamps, `orderLiveAt`, `cancelEffectiveAt`.
-- `fill_uncertain`: an eligible print observed after the order was finalized; no fill awarded; `reason: observed_after_finalization`, `finalAt`.
-- `queue_consumed`: a print at our price was absorbed by the displayed queue ahead of us; no fill awarded.
+- `fill_uncertain`: a print discarded as stale that was eligible for this order on venue time; nothing awarded; `reason: stale_print_discarded`, `lagMs`, both trade timestamps. Appended right after the `observation_rejected` entry it stems from.
+- `queue_consumed`: a print at our price was absorbed by the displayed queue ahead of us in venue order; no fill awarded; `queueAheadBefore`, `queueAheadAfter`.
 - `tx_cost`: `kind: placement | cancel`, amount, `cashAfter`.
 
 Outcomes and risk

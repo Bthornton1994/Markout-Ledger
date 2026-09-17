@@ -49,5 +49,9 @@ export function validateReplayConfig(c: ReplayConfig): void {
   if (c.controllerDeadlineMs >= c.windowMs) throw new RangeError('controllerDeadlineMs must be shorter than a window');
   if (c.numWindows !== undefined && (!Number.isInteger(c.numWindows) || c.numWindows < 1)) throw new RangeError('numWindows must be >= 1');
   for (const h of c.outcomeHorizonsMs) if (!Number.isInteger(h) || h <= 0) throw new RangeError('outcome horizons must be positive integers');
-  if (c.execution.orderLatencyMs < 0 || c.execution.cancelLatencyMs < 0) throw new RangeError('latencies must be >= 0');
+  for (const key of ['orderLatencyMs', 'cancelLatencyMs'] as const) {
+    const v = c.execution[key];
+    if (!Number.isInteger(v) || v < 0) throw new RangeError(`execution.${key} must be a non-negative integer millisecond (zero is allowed), got ${String(v)}`);
+  }
+  if (!Number.isInteger(c.maxStalenessMs) || c.maxStalenessMs < 0) throw new RangeError('maxStalenessMs must be a non-negative integer');
 }

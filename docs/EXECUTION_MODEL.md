@@ -22,13 +22,32 @@ eligible  <=>  liveAt < trade.marketTime <= cancelEffectiveAt      (cancelEffect
 | print after the cancel took effect | `marketTime > cancelEffectiveAt` | no fill | `fill_ineligible(after_cancellation)` |
 | eligible print observed after finalization | `obsTime > cancelEffectiveAt + maxTradeLagMs` | cannot be established; **not awarded** | `fill_uncertain(observed_after_finalization)` |
 
-A cancelled order is therefore *provisional* until `finalAt = cancelEffectiveAt + maxTradeLagMs` (recorded in `cancel_effective`). The engine sets `maxTradeLagMs` to its observation staleness limit (`maxStalenessMs`, default 500 ms), so any trade lagging more than that is rejected as stale before it reaches the exchange; the `fill_uncertain` path exists so the exchange stays honest if it is ever driven with a looser feed. Ineligible prints never consume `queueAhead` either.
+### Prints observed out of venue order (bounded reordering window)
+
+Eligibility alone is not enough: queue matching is order-sensitive. If print X at our price (venue 100) is observed *after* print Y through our price (venue 200), arrival-order matching lets Y zero the queue and then X fill the rest, while in venue order X is absorbed by the queue and only Y fills. The audit's Case B: arrival order awards 1.000, venue order supports 0.300.
+
+The exchange therefore never matches in arrival order. Per side it keeps every eligible print whose venue time lies inside the **reordering window** `[now - maxTradeLagMs, now]` in venue order, and on each arrival re-runs the matching from a checkpoint over that window. Let `F(S)` be the venue-ordered fill total over a set of known prints `S`. `F` is monotone in `S` (an extra print can only advance our queue position or hit us), so the exchange awards
+
+```
+awarded now  =  F(prints known now)  -  F(prints known before)      (never negative)
+```
+
+at the observation time of the arriving print. Consequences:
+
+- Every award is supported by prints actually observed; nothing is ever revised downward, so the policy, the portfolio and the ledger stay causal (a print affects nothing before its `obsTime`).
+- A fill may be *released* by an earlier-venue print observed late (`fill.reorderAdjustmentQty > 0`, `fillType: reordered` when the arriving print itself contributes nothing); `fill.venueOrderContribution` records what the arriving print fills on its own.
+- Awards are a lower bound on the venue-time truth until the window has moved past the prints involved.
+- Prints with `marketTime < now - maxTradeLagMs` can no longer be preceded by anything observable (a later-observed print with an earlier venue time would exceed the lag bound and is discarded as stale), so that prefix is folded into the orders' checkpoints and is final. The window therefore bounds both the work per arrival and the time until a fill total is final.
+- Prints shared between several of our own orders are re-simulated in price-time priority, so a late earlier print can shift quantity between our orders but never over-award the side.
+
+`maxTradeLagMs` is the engine's observation staleness limit (`maxStalenessMs`, default 500 ms). A print that lags more than that never reaches the matcher (the exchange refuses it); the engine discards it as stale and hands it to `noteDiscardedTrade`. If it was price-relevant and venue-eligible for one of our orders, the ledger records `fill_uncertain(stale_print_discarded)` for that order: the data cannot establish whether it filled us, nothing is awarded, and the summary's `fills.uncertain` counts it. A cancelled order is *provisional* until `finalAt = cancelEffectiveAt + maxTradeLagMs` (recorded in `cancel_effective`), after which no late fill can arrive. Ineligible prints never consume `queueAhead`.
 
 Late fills matter for risk: the risk gate charges exposure for orders the strategy considers open (pending, live, cancel in flight), **not** for provisionally cancelled ones. A late fill can therefore push inventory past the position limit after a replacement order was already accepted. The engine logs that as `risk_breach(position_overrun)` (no kill switch) and the gate rejects any further increasing order until inventory is reduced. Counting provisional orders as exposure would block a quoter for `maxTradeLagMs` after every requote and was judged too blunt; the trade-off is documented rather than hidden.
 
 Remaining uncertainty in this model, stated plainly:
 
-- `liveAt` and `cancelEffectiveAt` are modeled constants, not observed venue acknowledgements. Real activation and cancel times are distributions.
+- `liveAt` and `cancelEffectiveAt` are modeled constants, not observed venue acknowledgements. Real activation and cancel times are distributions. Zero latency is allowed: the order is live at submission and a cancel takes effect at request (still never before `liveAt`).
+- Prints discarded as stale are unknowns, not zeros: `fills.uncertain` counts the eligible ones. A large count means the feed, not the model, decides the result.
 - The queue estimate at `liveAt` uses the latest *observed* book, whose venue time precedes `liveAt` by the feed lag (`order_live.bookLagMs`). Prints between that book's venue time and `liveAt` are ineligible for us but may have thinned the level; the estimate is therefore pessimistic by up to that much.
 - Fill notification latency is folded into the trade's observation lag; a real venue would acknowledge a fill on its own clock.
 - Tie handling at millisecond resolution is a rule, not knowledge: at activation the fill is withheld, at cancellation it is awarded. Both are the adverse choice for a passive quoter.
@@ -41,7 +60,7 @@ submit(t)  -> pending -> live at t + orderLatencyMs -> [fills] -> filled
 live-time checks: no valid book -> rejected(no_book); would cross the touch -> rejected(post_only_would_cross)
 ```
 
-Defaults: order latency 50 ms, cancel latency 50 ms (both fixed, in simulated time). Orders are post-only limit orders; there is no taker path.
+Defaults: order latency 50 ms, cancel latency 50 ms (both fixed, in simulated time; zero is allowed and means the transition happens at the same instant, after the observations of that instant). Orders are post-only limit orders; there is no taker path. Configuration rejects negative or non-integer latencies with a clear error.
 
 ## Queue model: pessimistic back-of-queue
 

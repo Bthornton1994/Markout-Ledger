@@ -82,7 +82,9 @@ Each of these is a test in `tests/` that exercises the public interfaces rather 
 - a steering instruction affects only the next window, applies from the first tick at or after it is ready, and is discarded when late, failed or invalid
 - replay is deterministic (byte-identical ledgers; committed fixtures regenerate from their seeds)
 - a book touch alone never creates a fill; a print at our price fills only past the displayed queue; a fill never exceeds the print
-- fill eligibility is decided on venue time: a trade printed before an order was live cannot fill it even if observed afterwards; a trade printed while live but observed after the cancel took effect is a late fill; unresolvable cases are recorded as uncertainty, never awarded
+- fill eligibility is decided on venue time: a trade printed before an order was live cannot fill it even if observed afterwards; a trade printed while live but observed after the cancel took effect is a late fill
+- prints observed out of venue order are matched in venue order within a bounded window (the audit's Case B awards 0.300, not 1.000); awards only ever grow, so decisions stay causal
+- a stale-discarded print that was eligible for a resting order is recorded as order-linked uncertainty, never awarded; zero order and cancel latency replay cleanly
 - the cancel/fill race is resolved consistently on venue time (fill wins at equal timestamps) and every order reaches exactly one terminal state
 - the ledger is chronological: a malformed or out-of-order event later in the stream is rejected when encountered and leaves no trace in the earlier ledger prefix
 - net P&L reconciles exactly with inventory, cash, fees and modeled execution costs, rebuilt independently from ledger events

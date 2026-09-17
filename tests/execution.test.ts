@@ -331,13 +331,18 @@ describe('paper execution model', () => {
       expect(ineligible(h)).toEqual(['after_cancellation']);
     });
 
-    it('an eligible print observed after finalization is recorded as uncertain, not awarded', () => {
+    it('an eligible print that had to be discarded (lag beyond the bound) is recorded as uncertain, not awarded', () => {
       const h = setup({ cancel: true });
-      h.feedTrade(mkTrade(1000, '99.80', '1', 'sell', 440)); // finalAt = 450 + 500 = 950 < 1000
       h.run();
+      const late = mkTrade(1000, '99.80', '1', 'sell', 440); // lag 560 > 500: the engine discards it as stale
+      expect(() => h.ex.onTrade(late, T0 + 1000)).toThrow(/maxTradeLagMs/);
+      h.ex.noteDiscardedTrade(late, T0 + 1000);
       expect(h.fills()).toHaveLength(0);
-      expect(uncertain(h)).toEqual(['observed_after_finalization']);
+      expect(uncertain(h)).toEqual(['stale_print_discarded']);
       expect(h.ex.get('o1')!.filledQty).toBe(0n);
+      // a discarded print outside the order's venue-time window is not uncertainty for it
+      h.ex.noteDiscardedTrade(mkTrade(1100, '99.80', '1', 'sell', 460), T0 + 1100);
+      expect(uncertain(h)).toHaveLength(1);
     });
 
     it('a finalized order is not re-evaluated against ordinary later prints', () => {

@@ -192,6 +192,7 @@ class ReplayEngine {
     partialFills: 0,
     tradeThrough: 0,
     queueExhausted: 0,
+    reordered: 0,
     queueConsumedWithoutFill: 0,
     observationsAccepted: 0,
     observationsRejected: 0,
@@ -347,6 +348,8 @@ class ReplayEngine {
       const stale = checkStaleness(ev, this.cfg.maxStalenessMs);
       if (!stale.ok) {
         this.rejectObservation(ev, stale);
+        // A discarded print that was eligible for one of our orders is order-linked uncertainty, not silence.
+        if (ev.type === 'trade') this.exchange.noteDiscardedTrade(ev, this.now);
         return;
       }
       this.acceptObservation(ev);
@@ -526,8 +529,8 @@ class ReplayEngine {
           tradeEventId: ev.trade.eventId,
           tradeSize: fmtQty(ev.trade.size),
           queueAheadBefore: fmtQty(ev.queueAheadBefore),
-          queueAheadAfter: fmtQty(o.queueAhead),
-          note: 'trade at our price consumed by displayed queue ahead of us; no fill awarded',
+          queueAheadAfter: fmtQty(ev.queueAheadAfter),
+          note: 'print at our price absorbed by the displayed queue ahead of us in venue order; no fill awarded',
         });
         return;
       case 'fill':
@@ -568,9 +571,9 @@ class ReplayEngine {
           tradeObsTime: ev.trade.obsTime,
           orderLiveAt: o.liveAt,
           cancelEffectiveAt: o.cancelEffectiveAt,
-          finalAt: o.finalAt,
+          lagMs: ev.trade.obsTime - ev.trade.marketTime,
           reason: ev.reason,
-          note: 'print was eligible on venue time but observed after the order was finalized; fill cannot be established, none awarded',
+          note: 'print was eligible on venue time but discarded as stale; the data cannot establish whether it filled us, nothing awarded',
         });
         return;
       default:
@@ -599,7 +602,8 @@ class ReplayEngine {
       this.win.partialFills++;
     }
     if (ev.fillType === 'trade_through') this.totals.tradeThrough++;
-    else this.totals.queueExhausted++;
+    else if (ev.fillType === 'queue_exhausted') this.totals.queueExhausted++;
+    else this.totals.reordered++;
     if (ev.afterCancelEffective) {
       this.totals.lateFillsAfterCancel++;
       this.win.lateFillsAfterCancel++;
@@ -623,6 +627,8 @@ class ReplayEngine {
       observedAt: this.now,
       fillType: ev.fillType,
       queueAheadBefore: fmtQty(ev.queueAheadBefore),
+      venueOrderContribution: fmtQty(ev.venueOrderContribution),
+      reorderAdjustmentQty: fmtQty(ev.reorderAdjustmentQty),
       duringCancelPending: ev.duringCancelPending,
       afterCancelEffective: ev.afterCancelEffective,
       realizedDelta: fmtMoney(app.realizedDelta),
@@ -1212,6 +1218,7 @@ class ReplayEngine {
         partial: t.partialFills,
         tradeThrough: t.tradeThrough,
         queueExhausted: t.queueExhausted,
+        reordered: t.reordered,
         lateAfterCancel: t.lateFillsAfterCancel,
         ineligible: t.fillsIneligible,
         ineligibleByReason: {

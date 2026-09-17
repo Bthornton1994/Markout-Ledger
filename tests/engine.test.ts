@@ -518,6 +518,52 @@ describe('venue-time fill eligibility inside the replay', () => {
   });
 });
 
+describe('order-linked uncertainty and zero latency in a full replay', () => {
+  it('a stale-discarded print that was eligible for a resting order is logged as fill_uncertain and never filled', async () => {
+    const fx = makeFixture(
+      [
+        ...flatBooks(0, 3000, '100.00', '100.02'),
+        trade(100, '99.80', '1', 'sell', { lag: 600 }), // printed while live (liveAt 50), observed at 700 with lag > 500 -> stale
+        trade(1500, '99.80', '0.2', 'sell', { lag: 100 }), // ordinary print: fills
+      ],
+      { durationMs: 3000 },
+    );
+    const r = await replay({ fixture: fx, policy: fixedQuotePolicy({ bid: '99.90', qty: '1' }), controller: null, config: testConfig({ steering: 'disabled', maxStalenessMs: 500 }) });
+    expect(r.ledger.ofType('observation_rejected').map((x) => [x.reason, x.simTime - T0])).toEqual([['stale_observation', 700]]);
+    const unc = r.ledger.ofType('fill_uncertain');
+    expect(unc.map((u) => [u.simTime - T0, u.orderId, u.reason, u.lagMs, u.tradeMarketTime - T0])).toEqual([[700, 'o1', 'stale_print_discarded', 600, 100]]);
+    expect(r.ledger.ofType('fill').map((f) => [f.simTime - T0, f.qty])).toEqual([[1600, '0.200000']]);
+    expect(r.summary.fills).toMatchObject({ count: 1, uncertain: 1 });
+    // the ledger position of the doubt is chronological and sits next to the rejection it stems from
+    const rej = r.ledger.ofType('observation_rejected')[0]!;
+    expect(unc[0]!.ledgerSeq).toBe(rej.ledgerSeq + 1);
+  });
+
+  it('zero order and cancel latency replays cleanly: live at submission, cancelled at request', async () => {
+    const fx = makeFixture([...flatBooks(0, 3000, '99.90', '99.92', 100, { bidSize: '0' }), trade(1000, '99.80', '1', 'sell')], { durationMs: 3000 });
+    const cfg = testConfig({ steering: 'disabled', execution: { ...testConfig().execution, orderLatencyMs: 0, cancelLatencyMs: 0 } });
+    const r = await replay({ fixture: fx, policy: fixedQuotePolicy({ bid: '99.90', qty: '1', pullTicks: [2] }), controller: null, config: cfg });
+    const submitted = r.ledger.ofType('order_submitted')[0]!;
+    const live = r.ledger.ofType('order_live')[0]!;
+    expect(live.liveAt).toBe(submitted.submittedAt);
+    expect(live.ledgerSeq).toBe(submitted.ledgerSeq + 2); // submitted, tx_cost, live: same instant
+    const cancelReq = r.ledger.ofType('cancel_requested')[0]!;
+    const cancelEff = r.ledger.ofType('cancel_effective')[0]!;
+    expect(cancelReq.expectedEffectiveAt).toBe(cancelReq.requestedAt);
+    expect(cancelEff.simTime).toBe(cancelReq.requestedAt);
+    // the order re-placed at tick 3 (t=900) is live immediately and the print at t=1000 fills it
+    expect(r.ledger.ofType('fill').map((f) => [f.simTime - T0, f.qty])).toEqual([[1000, '1.000000']]);
+    expect(r.summary.orders.rejectedByVenue).toBe(0);
+  });
+
+  it('non-integer latencies are rejected at configuration time with a clear message', async () => {
+    const cfg = testConfig({ execution: { ...testConfig().execution, orderLatencyMs: 12.5 } });
+    await expect(replay({ fixture: makeFixture(flatBooks(0, 3000, '100.00', '100.02'), { durationMs: 3000 }), policy: fixedQuotePolicy({}), controller: null, config: cfg })).rejects.toThrow(
+      /execution\.orderLatencyMs must be a non-negative integer/,
+    );
+  });
+});
+
 describe('chronological ledger: a bad event later in the stream leaves no earlier trace', () => {
   const cutoff = T0 + 15_000;
   const prefix = (entries: readonly LedgerEntry[]) => entries.filter((e) => e.type !== 'replay_started' && e.simTime <= cutoff).map(stripHashes);

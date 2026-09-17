@@ -12,7 +12,7 @@
 import type { Decimal } from '../core/money.js';
 import type { Aggressor } from '../market/events.js';
 import type { ObservationRejectReason, RejectPhase } from '../market/validation.js';
-import type { IneligibleReason, RaceOutcome } from '../execution/paper.js';
+import type { FillType, IneligibleReason, RaceOutcome } from '../execution/paper.js';
 import type { SteeringInstruction, SteeringParams } from '../controller/instruction.js';
 import type { WindowReview } from '../controller/types.js';
 
@@ -205,8 +205,13 @@ export interface FillEvent extends Base {
   tradeMarketTime: number;
   /** Observation time of the print: when the strategy learned and the portfolio was updated (== simTime). */
   observedAt: number;
-  fillType: 'trade_through' | 'queue_exhausted';
+  /** reordered: the quantity was released by re-ordering earlier-observed prints rather than by this print itself. */
+  fillType: FillType;
   queueAheadBefore: Decimal;
+  /** Quantity the establishing print itself fills in venue order. */
+  venueOrderContribution: Decimal;
+  /** qty - venueOrderContribution: released (positive) or absorbed (negative) by re-ordering earlier-observed prints. */
+  reorderAdjustmentQty: Decimal;
   duringCancelPending: boolean;
   /** The trade was printed while the order was live but observed after the cancel took effect. */
   afterCancelEffective: boolean;
@@ -246,8 +251,9 @@ export interface FillUncertainEvent extends Base {
   tradeObsTime: number;
   orderLiveAt: number;
   cancelEffectiveAt: number | null;
-  finalAt: number | null;
-  reason: 'observed_after_finalization';
+  /** The observation lag that caused the print to be discarded. */
+  lagMs: number;
+  reason: 'stale_print_discarded';
   note: string;
 }
 
