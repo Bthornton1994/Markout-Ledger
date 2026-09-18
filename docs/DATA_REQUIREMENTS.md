@@ -16,6 +16,8 @@ They exist to make the engine deterministic and testable. They are **not** a mar
 
 ## Real data required for a credible evaluation
 
+Milestone 2 turns this list into a contract: [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md) selects the feed, [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md) defines capture, normalization and fixture schema v2, and [M2_EVALUATION_PROTOCOL.md](M2_EVALUATION_PROTOCOL.md) separates recorded-market evaluation from fill calibration (item 5 below).
+
 For a specific venue and instrument, all with capture timestamps:
 
 1. **Full-depth order-book updates with sequence numbers** (L2 deltas at minimum; L3 / per-order feeds where the venue offers them). Snapshots every 100 ms lose the intra-interval touches and cancels that decide fills. Sequence numbers are needed to detect gaps and duplicates instead of guessing.

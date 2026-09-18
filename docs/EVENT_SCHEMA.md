@@ -1,6 +1,6 @@
 # Observation event schema
 
-Fixtures are JSONL: one header line followed by one observation per line. Parsing lives in `src/market/events.ts`; validation in `src/market/validation.ts`.
+Fixtures are JSONL: one header line followed by one observation per line. Parsing lives in `src/market/events.ts`; validation in `src/market/validation.ts`. This document describes schema version 1 (the shipped synthetic fixtures). Schema version 2, required for recorded data, adds capture provenance, instrument specification, rights and per-event raw references without changing the meaning of any version-1 field: see [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md) section 6 and `schemas/fixture.v2.schema.json`.
 
 ## Time model
 

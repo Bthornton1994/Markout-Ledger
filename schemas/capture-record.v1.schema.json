@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/capture-record.v1.schema.json",
+  "title": "Markout Ledger raw capture record (capture format v1)",
+  "description": "One JSONL line of a first-party market-data capture. Every record carries the capture host's realtime clock in integer milliseconds (recvWallMs, from Date.now()) and its monotonic clock in nanoseconds (recvMonoNs, from process.hrtime.bigint(), as a decimal string), both taken at receipt before parsing. Payloads are verbatim. See docs/M2_DATA_CONTRACT.md section 4.",
+  "type": "object",
+  "required": ["type", "recvWallMs", "recvMonoNs"],
+  "properties": {
+    "type": {
+      "enum": ["manifest_start", "file_start", "ws_open", "ws_close", "ws_error", "subscribe", "unsubscribe", "snapshot_request", "snapshot", "message", "probe", "note", "file_end", "manifest_end"]
+    },
+    "recvWallMs": { "type": "integer", "minimum": 0 },
+    "recvMonoNs": { "$ref": "#/$defs/ns" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "manifest_start" } }, "required": ["type"] },
+      "then": {
+        "type": "object",
+        "required": ["captureFormatVersion", "captureId", "venue", "instrument", "streams", "endpoints", "capturer", "host", "clock", "instrumentSpec", "startedAtIso"],
+        "properties": {
+          "captureFormatVersion": { "const": 1 },
+          "captureId": { "type": "string", "format": "uuid" },
+          "venue": { "type": "string" },
+          "instrument": { "type": "string", "description": "venue-native symbol" },
+          "streams": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "endpoints": { "type": "object", "required": ["ws", "rest"], "properties": { "ws": { "type": "string" }, "rest": { "type": "string" } } },
+          "capturer": { "$ref": "#/$defs/softwareWithCommit" },
+          "host": { "type": "object", "required": ["os", "runtime"], "properties": { "os": { "type": "string" }, "runtime": { "type": "string" } }, "additionalProperties": false },
+          "clock": { "$ref": "#/$defs/clock" },
+          "instrumentSpec": { "$ref": "#/$defs/instrumentSpecRaw" },
+          "startedAtIso": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "file_start" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["fileIndex", "previousFileSha256"], "properties": { "fileIndex": { "type": "integer", "minimum": 1 }, "previousFileSha256": { "$ref": "#/$defs/sha256" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["ws_open", "ws_close", "ws_error", "note"] } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["detail"], "properties": { "detail": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["subscribe", "unsubscribe"] } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["request"], "properties": { "request": { "type": "string", "description": "verbatim text sent; written at send time, the venue's acknowledgement is a later message record" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "snapshot_request" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "snapshot" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["url", "httpStatus", "payload"], "properties": { "url": { "type": "string" }, "httpStatus": { "type": "integer" }, "payload": { "type": "string" }, "encoding": { "enum": ["utf8", "base64"] } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["payload"], "properties": { "stream": { "type": "string" }, "payload": { "type": "string" }, "encoding": { "enum": ["utf8", "base64"] } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "probe" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["url", "sentWallMs", "sentMonoNs", "payload"], "properties": { "url": { "type": "string" }, "sentWallMs": { "type": "integer", "minimum": 0 }, "sentMonoNs": { "$ref": "#/$defs/ns" }, "payload": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "file_end" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["fileIndex", "records", "sha256"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "records": { "type": "integer", "minimum": 1 }, "sha256": { "$ref": "#/$defs/sha256" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "manifest_end" } }, "required": ["type"] },
+      "then": {
+        "type": "object",
+        "required": ["endedAtIso", "clock", "counts", "files"],
+        "properties": {
+          "endedAtIso": { "type": "string", "format": "date-time" },
+          "clock": { "$ref": "#/$defs/clock" },
+          "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+          "files": { "type": "array", "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "ns": { "type": "string", "pattern": "^[0-9]{1,20}$", "description": "integer nanoseconds as a decimal string" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "softwareWithCommit": { "type": "object", "required": ["name", "version", "commit"], "properties": { "name": { "type": "string" }, "version": { "type": "string" }, "commit": { "type": "string" } } },
+    "clock": {
+      "type": "object",
+      "required": ["source", "synchronized", "takenAtIso"],
+      "properties": {
+        "source": { "enum": ["chrony", "ntpd", "ptp", "platform", "unknown"] },
+        "report": { "type": "string", "description": "verbatim tool output, e.g. chronyc tracking" },
+        "offsetMs": { "type": "number" },
+        "stratum": { "type": "integer" },
+        "synchronized": { "type": "boolean" },
+        "takenAtIso": { "type": "string", "format": "date-time" }
+      }
+    },
+    "instrumentSpecRaw": {
+      "type": "object",
+      "required": ["source", "fetchedAtIso", "payload"],
+      "properties": { "source": { "type": "string" }, "fetchedAtIso": { "type": "string", "format": "date-time" }, "payload": { "type": "string", "description": "verbatim instrument/exchange-info response" } }
+    }
+  }
+}
