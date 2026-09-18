@@ -398,3 +398,162 @@ describe('accounting under the level FIFO', () => {
     expect(Ledger.verify(r.ledger.all())).toEqual({ ok: true });
   });
 });
+
+/**
+ * N1 (Independent QA HIGH, SHA 574a8d3c): a print with venue time at or before a later own
+ * order's liveAt must not consume that order's displayed queue, even when it is eligible for
+ * an earlier own order at the same price and arrives out of venue order inside the lag bound.
+ */
+describe('N1: pre-activation prints must not consume a later own order\'s displayed queue', () => {
+  function fillsOf(h: Harness, orderId: string) {
+    return h.fills().filter((f) => f.order.orderId === orderId);
+  }
+
+  /** Independent QA §4.1: A live then provisionally cancelled; replacement B at the same price. */
+  function replacementHarness(lateObs: number, secondSize = '1.0') {
+    const h = harness({ bidSize: '2' });
+    h.submit(0, 'buy', '99.90', '1', 'a'); // o1 live at 50, level queue 2.0
+    h.at(300, Priority.TICK, () => {
+      h.ex.requestCancel('o1', T0 + 300, 'requote'); // effective 350, final 850
+    });
+    h.submit(600, 'buy', '99.90', '1', 'b'); // o2 live at 650 while A is still provisional
+    h.feed(mkPrint(lateObs, 320, '99.90', '1.2')); // inside A's window; predates B
+    h.feed(mkPrint(800, 800, '99.90', secondSize));
+    h.run();
+    return h;
+  }
+
+  it('the replacement receives zero fills whether the pre-activation print arrives in venue order or late within the lag bound', () => {
+    const inOrder = replacementHarness(330); // obs 330 < B liveAt 650
+    const outOfOrder = replacementHarness(700); // obs 700, lag 380 <= 500
+    expect(fillsOf(inOrder, 'o2').map((f) => f.qty)).toEqual([]);
+    expect(fillsOf(outOfOrder, 'o2').map((f) => f.qty)).toEqual([]);
+    expect(fillsOf(outOfOrder, 'o2').map((f) => f.qty)).toEqual(fillsOf(inOrder, 'o2').map((f) => f.qty));
+    expect(inOrder.ex.get('o2')!.filledQty).toBe(0n);
+    expect(outOfOrder.ex.get('o2')!.filledQty).toBe(0n);
+    expect(inOrder.ex.get('o2')!.queueAhead).toBe(outOfOrder.ex.get('o2')!.queueAhead);
+    expect(outOfOrder.events.some((e) => e.kind === 'fill_ineligible' && e.order.orderId === 'o2' && e.reason === 'predates_activation')).toBe(true);
+  });
+
+  it('a late print still late-fills the provisionally cancelled order; leftover never reaches the replacement', () => {
+    const h = harness({ bidSize: '2' });
+    h.submit(0, 'buy', '99.90', '1', 'a');
+    h.at(300, Priority.TICK, () => h.ex.requestCancel('o1', T0 + 300, 'requote'));
+    h.submit(600, 'buy', '99.90', '1', 'b');
+    h.feed(mkPrint(700, 320, '99.90', '3.0')); // 2.0 queue + 1.0 fills A; B ineligible
+    h.feed(mkPrint(800, 800, '99.90', '1.0')); // absorbed by B's preserved 2.0 queue
+    h.run();
+    expect(fillsOf(h, 'o1').map((f) => [f.qty, f.afterCancelEffective, f.at - T0])).toEqual([[parseQty('1'), true, 700]]);
+    expect(fillsOf(h, 'o2')).toHaveLength(0);
+    expect(h.ex.get('o1')!.lateFilledQty).toBe(parseQty('1'));
+    expect(h.ex.get('o1')!.state).toBe('cancelled');
+    expect(fillsOf(h, 'o1')[0]!.qty <= h.fills()[0]!.sourceTrade.size).toBe(true);
+  });
+
+  it('concurrent live orders keep time priority and the later order keeps the volume displayed at its liveAt', () => {
+    function run(lateObs: number) {
+      const h = harness({ bidSize: '2' });
+      h.submit(0, 'buy', '99.90', '1', 'a'); // live 50
+      h.submit(600, 'buy', '99.90', '1', 'b'); // live 650; both rest
+      h.feed(mkPrint(lateObs, 320, '99.90', '1.2'));
+      h.feed(mkPrint(800, 800, '99.90', '2.5')); // 0.8 level + 1.0 A; 0.7 leftover < B's preserved 1.2 between
+      h.run();
+      return h;
+    }
+    const inOrder = run(330);
+    const outOfOrder = run(700);
+    expect(inOrder.fills().map((f) => [f.order.orderId, f.qty])).toEqual([['o1', parseQty('1')]]);
+    expect(outOfOrder.fills().map((f) => [f.order.orderId, f.qty])).toEqual(inOrder.fills().map((f) => [f.order.orderId, f.qty]));
+    expect(inOrder.ex.get('o2')!.filledQty).toBe(0n);
+    expect(outOfOrder.ex.get('o2')!.filledQty).toBe(0n);
+    expect(inOrder.ex.get('o1')!.filledQty).toBe(parseQty('1'));
+  });
+
+  it('once a later eligible print exhausts the preserved queue, both permutations fill the replacement identically', () => {
+    const inOrder = replacementHarness(330, '3.0');
+    const outOfOrder = replacementHarness(700, '3.0');
+    const o2In = fillsOf(inOrder, 'o2').map((f) => [f.qty, f.queueAheadBefore, f.at - T0, f.sourceTrade.marketTime - T0]);
+    const o2Out = fillsOf(outOfOrder, 'o2').map((f) => [f.qty, f.queueAheadBefore, f.at - T0, f.sourceTrade.marketTime - T0]);
+    expect(o2In).toEqual([[parseQty('1'), parseQty('2'), 800, 800]]);
+    expect(o2Out).toEqual(o2In);
+    expect(fillsOf(inOrder, 'o2')[0]!.qty <= fillsOf(inOrder, 'o2')[0]!.sourceTrade.size).toBe(true);
+  });
+
+  it('preserving the replacement queue survives folding the pre-activation print out of the reordering window', () => {
+    function run(lateObs: number) {
+      const h = harness({ bidSize: '2' });
+      h.submit(0, 'buy', '99.90', '1', 'a');
+      h.at(300, Priority.TICK, () => h.ex.requestCancel('o1', T0 + 300, 'requote'));
+      h.submit(600, 'buy', '99.90', '1', 'b');
+      h.feed(mkPrint(lateObs, 320, '99.90', '1.2'));
+      h.feed(mkPrint(900, 900, '99.90', '0.1')); // fold cut = 400; venue 320 is folded
+      h.run();
+      return h;
+    }
+    const inOrder = run(330);
+    const outOfOrder = run(700);
+    expect(fillsOf(inOrder, 'o2')).toHaveLength(0);
+    expect(fillsOf(outOfOrder, 'o2')).toHaveLength(0);
+    expect(inOrder.ex.get('o2')!.queueAhead).toBe(parseQty('1.9'));
+    expect(outOfOrder.ex.get('o2')!.queueAhead).toBe(inOrder.ex.get('o2')!.queueAhead);
+  });
+
+  it('a through print observed late that predates the replacement also leaves its displayed queue intact', () => {
+    function run(lateObs: number) {
+      const h = harness({ bidSize: '2' });
+      h.submit(0, 'buy', '99.90', '1', 'a');
+      h.at(300, Priority.TICK, () => h.ex.requestCancel('o1', T0 + 300, 'requote'));
+      h.submit(600, 'buy', '99.90', '1', 'b');
+      h.feed(mkPrint(lateObs, 320, '99.89', '0.5'));
+      h.feed(mkPrint(800, 800, '99.90', '1.0'));
+      h.run();
+      return h;
+    }
+    const inOrder = run(330);
+    const outOfOrder = run(700);
+    expect(fillsOf(inOrder, 'o2')).toHaveLength(0);
+    expect(fillsOf(outOfOrder, 'o2')).toHaveLength(0);
+    expect(fillsOf(inOrder, 'o1').map((f) => f.qty)).toEqual([parseQty('0.5')]);
+    expect(fillsOf(outOfOrder, 'o1').map((f) => f.qty)).toEqual(fillsOf(inOrder, 'o1').map((f) => f.qty));
+  });
+
+  it('engine §4.1: in-order and out-of-order feeds give the replacement identical zero fills; ledger reconciles', async () => {
+    const run = (lag: number) => {
+      const fx = makeFixture(
+        [
+          ...flatBooks(0, 3000, '99.90', '99.92', 100, { bidSize: '2' }),
+          trade(320, '99.90', '1.2', 'sell', { lag, id: 'late-print' }),
+          trade(800, '99.90', '1.0', 'sell', { id: 'small-print' }),
+        ],
+        { durationMs: 3000 },
+      );
+      return replay({
+        fixture: fx,
+        policy: fixedQuotePolicy({ bid: '99.90', qty: '1', pullTicks: [1] }),
+        controller: null,
+        config: testConfig({ steering: 'disabled' }),
+      });
+    };
+    const inOrder = await run(10);
+    const outOfOrder = await run(380);
+    const o2 = (r: Awaited<ReturnType<typeof run>>) => r.ledger.ofType('fill').filter((f) => f.orderId === 'o2');
+    expect(o2(inOrder)).toHaveLength(0);
+    expect(o2(outOfOrder)).toHaveLength(0);
+    expect(inOrder.summary.fills.count).toBe(outOfOrder.summary.fills.count);
+    expect(inOrder.ledger.ofType('order_live').find((e) => e.orderId === 'o2')!.queueAhead).toBe('2.000000');
+    expect(outOfOrder.ledger.ofType('order_live').find((e) => e.orderId === 'o2')!.queueAhead).toBe('2.000000');
+    expect(outOfOrder.ledger.ofType('fill_ineligible').some((e) => e.orderId === 'o2' && e.reason === 'predates_activation')).toBe(true);
+    for (const r of [inOrder, outOfOrder]) {
+      expect(Ledger.verify(r.ledger.all())).toEqual({ ok: true });
+      const p = r.summary.portfolio;
+      expect(parseMoney(p.netPnl)).toBe(parseMoney(p.grossRealized) + parseMoney(p.unrealized) - parseMoney(p.feesPaid) - parseMoney(p.txCostsPaid));
+      for (const f of r.ledger.ofType('fill')) {
+        expect(parseQty(f.qty) <= parseQty(f.sourceTradeSize)).toBe(true);
+        expect(f.observedAt).toBe(f.simTime);
+        expect(f.sourceMarketTime).toBeLessThanOrEqual(f.observedAt);
+      }
+      const o1Cancel = r.ledger.ofType('cancel_effective').find((e) => e.orderId === 'o1')!;
+      expect(r.ledger.ofType('fill').every((f) => f.orderId !== 'o1' || f.sourceMarketTime <= o1Cancel.simTime)).toBe(true);
+    }
+  });
+});
