@@ -1,0 +1,26 @@
+{
+  "name": "markout-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Research replay engine and append-only decision ledger for a two-clock (fast policy / slow steering controller) paper-trading study. Synthetic research output only.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "replay": "tsx src/cli/main.ts replay",
+    "fixtures": "tsx src/cli/main.ts generate-fixtures",
+    "demo": "tsx src/cli/main.ts replay --scenario baseline --out out && tsx src/cli/main.ts replay --scenario riskgate --out out",
+    "check": "npm run typecheck && npm test && npm run demo"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1"
+  }
+}
