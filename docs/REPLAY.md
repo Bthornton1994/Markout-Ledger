@@ -29,7 +29,7 @@ npm run check                                      # typecheck + tests + demo
 | `baseline` | `fixtures/synthetic-baseline.jsonl` | 42 | 13 | max position 5, max loss 50 | mixed regimes; the controller widens after adverse markouts and relaxes when quiet |
 | `riskgate` | `fixtures/synthetic-riskgate.jsonl` | 7 | 12 | max position 2, max loss 3 | persistent sell pressure; position-limit rejections, then the loss-limit kill switch |
 
-Shared configuration (`src/scenarios.ts`): policy tick 300 ms, window 3000 ms, controller deadline 200 ms, staleness limit 500 ms, outcome horizons 1 s and 3 s, initial cash 10 000, base half-spread 5 bps, base quote size 1.0, order/cancel latency 50 ms, maker fee 2 bps, placement cost 0.005, cancel cost 0.002, tick 0.01, lot 0.001.
+Shared configuration (`src/scenarios.ts`): policy tick 300 ms, window 3000 ms, controller deadline 200 ms, staleness limit 500 ms, outcome horizons 1 s and 3 s (each horizon must be at least the staleness limit; configuration refuses shorter ones), initial cash 10 000, base half-spread 5 bps, base quote size 1.0, order/cancel latency 50 ms, maker fee 2 bps, placement cost 0.005, cancel cost 0.002, tick 0.01, lot 0.001.
 
 Each scenario runs `no_trade`, `unsteered` (steering disabled) and `steered` (deterministic controller) on the same fixture.
 

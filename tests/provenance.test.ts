@@ -103,4 +103,36 @@ describe('fill provenance under venue re-ordering', () => {
     // no quantity is ever credited beyond its source print's size
     expect(parseMoney(outcomes[0]!.qty) <= parseMoney('0.5')).toBe(true);
   });
+
+  it('F4 gate: an outcome horizon shorter than the staleness window is refused at configuration', async () => {
+    const fx = makeFixture(flatBooks(0, 3000, '99.90', '99.92'), { durationMs: 3000 });
+    const cfg = testConfig({ steering: 'disabled', maxStalenessMs: 500, outcomeHorizonsMs: [100, 3000] });
+    await expect(replay({ fixture: fx, policy: fixedQuotePolicy({}), controller: null, config: cfg })).rejects.toThrow(
+      /outcomeHorizonsMs must each be >= maxStalenessMs \(500 ms\).*got 100 ms/,
+    );
+  });
+
+  it('F4 boundary: with the horizon equal to the staleness window, the latest possible re-attribution still precedes measurement', async () => {
+    // B: through, venue 200, observed 250 -> books 1.0 from B. A: through, venue 100, observed at the maximum lag (600).
+    // Horizon 500: B's outcome would be measured at 700, after the re-attribution at 600, so nothing is kept on the old source.
+    const fx = makeFixture(
+      [
+        ...flatBooks(0, 3000, '99.90', '99.92', 100, { bidSize: '0' }),
+        trade(200, '99.85', '1.0', 'sell', { lag: 50 }), // B
+        trade(100, '99.85', '0.5', 'sell', { lag: 500 }), // A, lag == maxStalenessMs (accepted)
+      ],
+      { durationMs: 3000 },
+    );
+    const cfg = testConfig({ steering: 'disabled', maxStalenessMs: 500, outcomeHorizonsMs: [500] });
+    const r = await replay({ fixture: fx, policy: fixedQuotePolicy({ bid: '99.90', qty: '1' }), controller: null, config: cfg });
+    const re = r.ledger.ofType('fill_reattributed');
+    expect(re.map((x) => [x.simTime - T0, x.qty, x.outcomesRebased, x.outcomesKept])).toEqual([[600, '0.500000', [500], []]]);
+    const outcomes = r.ledger.ofType('outcome');
+    expect(outcomes.map((o) => [o.sourceMarketTime - T0, o.availableAt - T0, o.qty, o.status])).toEqual([
+      [100, 600, '0.500000', 'measured'],
+      [200, 700, '0.500000', 'measured'],
+    ]);
+    expect(outcomes.every((o) => o.availableAt >= re[0]!.simTime)).toBe(true);
+    expect(r.ledger.all().filter((e) => e.type === 'outcome' && e.status === 'superseded_by_reattribution')).toHaveLength(0);
+  });
 });

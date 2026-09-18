@@ -49,6 +49,16 @@ export function validateReplayConfig(c: ReplayConfig): void {
   if (c.controllerDeadlineMs >= c.windowMs) throw new RangeError('controllerDeadlineMs must be shorter than a window');
   if (c.numWindows !== undefined && (!Number.isInteger(c.numWindows) || c.numWindows < 1)) throw new RangeError('numWindows must be >= 1');
   for (const h of c.outcomeHorizonsMs) if (!Number.isInteger(h) || h <= 0) throw new RangeError('outcome horizons must be positive integers');
+  // A re-attribution of a fill can arrive up to maxStalenessMs after the print that established it. If an outcome
+  // horizon were shorter than that, an outcome could be measured before its quantity moves to its actual source
+  // print and the recorded markout would not describe the final provenance. Refuse such configurations.
+  for (const h of c.outcomeHorizonsMs) {
+    if (h < c.maxStalenessMs) {
+      throw new RangeError(
+        `outcomeHorizonsMs must each be >= maxStalenessMs (${c.maxStalenessMs} ms) so no outcome can be measured before a re-attribution of its fill; got ${h} ms`,
+      );
+    }
+  }
   for (const key of ['orderLatencyMs', 'cancelLatencyMs'] as const) {
     const v = c.execution[key];
     if (!Number.isInteger(v) || v < 0) throw new RangeError(`execution.${key} must be a non-negative integer millisecond (zero is allowed), got ${String(v)}`);
