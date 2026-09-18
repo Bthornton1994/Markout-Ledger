@@ -557,3 +557,92 @@ describe('N1: pre-activation prints must not consume a later own order\'s displa
     }
   });
 });
+
+/**
+ * N4 (Independent QA HIGH, SHA b7dbe88): shifting pre-activation level consumption into
+ * betweenQueue must not double-count when a venue-earlier print is observed after liveAt and
+ * re-attributes consumption that a later-venue print (already baked into between at activation)
+ * had taken. Replay must not abort; B's queue stays the 2.0 displayed-at-activation snapshot.
+ */
+describe('N4: re-attributing pre-activation consumption must not double-count between', () => {
+  function fillsOf(h: Harness, orderId: string) {
+    return h.fills().filter((f) => f.order.orderId === orderId);
+  }
+
+  /**
+   * Audit minimal reproducer. P_late venue 264 / P_early venue 280 (reversed venue vs the
+   * names: "early" is the one observed first in the failing feed). A live 50 level 2.0;
+   * cancel at 300; B live 650 with displayed 2.0; P_post 2.5 at 700 fills B 0.5 in-order.
+   */
+  function n4Harness(feed: 'in-order' | 'reversed', postObs = 700) {
+    const h = harness({ bidSize: '2' });
+    h.submit(0, 'buy', '99.90', '1', 'a');
+    h.at(300, Priority.TICK, () => h.ex.requestCancel('o1', T0 + 300, 'requote'));
+    h.submit(600, 'buy', '99.90', '1', 'b');
+    if (feed === 'in-order') {
+      h.feed(mkPrint(274, 264, '99.90', '1.2')); // P_late in venue order, obs before B
+      h.feed(mkPrint(290, 280, '99.90', '1.5'));
+    } else {
+      h.feed(mkPrint(300, 280, '99.90', '1.5')); // observed first, later venue time
+      h.feed(mkPrint(750, 264, '99.90', '1.2')); // obs 750, lag 486; venue-earlier
+    }
+    h.feed(mkPrint(postObs, 700, '99.90', '2.5'));
+    return h;
+  }
+
+  it('reversed observation vs venue order does not abort and matches in-order fills against the 2.0 activation queue', () => {
+    const inOrder = n4Harness('in-order');
+    const reversed = n4Harness('reversed');
+    expect(() => inOrder.run()).not.toThrow();
+    expect(() => reversed.run()).not.toThrow();
+    const liveQueue = (h: Harness) => {
+      const live = h.events.find((e) => e.kind === 'order_live' && e.order.orderId === 'o2') as Extract<ExecutionEvent, { kind: 'order_live' }>;
+      return [live.order.displayedAtLive, live.order.queueAhead];
+    };
+    expect(liveQueue(inOrder)).toEqual([parseQty('2'), parseQty('2')]);
+    expect(liveQueue(reversed)).toEqual([parseQty('2'), parseQty('2')]);
+    const o2 = (h: Harness) => fillsOf(h, 'o2').map((f) => [f.qty, f.queueAheadBefore, f.at - T0, f.sourceTrade.marketTime - T0]);
+    expect(o2(inOrder)).toEqual([[parseQty('0.5'), parseQty('2'), 700, 700]]);
+    expect(o2(reversed)).toEqual(o2(inOrder));
+    expect(inOrder.ex.get('o2')!.filledQty).toBe(parseQty('0.5'));
+    expect(reversed.ex.get('o2')!.filledQty).toBe(inOrder.ex.get('o2')!.filledQty);
+  });
+
+  it('when the eligible print is observed after the late earlier print, both permutations still fill 0.5 (no silent under-award)', () => {
+    const inOrder = n4Harness('in-order', 800);
+    const reversed = n4Harness('reversed', 800);
+    expect(() => inOrder.run()).not.toThrow();
+    expect(() => reversed.run()).not.toThrow();
+    const o2 = (h: Harness) => fillsOf(h, 'o2').map((f) => [f.qty, f.queueAheadBefore]);
+    expect(o2(inOrder)).toEqual([[parseQty('0.5'), parseQty('2')]]);
+    expect(o2(reversed)).toEqual(o2(inOrder));
+  });
+
+  it('engine: reversed pre-activation prints do not abort replay and match in-order replacement fills', async () => {
+    const run = (kind: 'in-order' | 'reversed') => {
+      const pre =
+        kind === 'in-order'
+          ? [trade(264, '99.90', '1.2', 'sell', { lag: 10, id: 'p-late' }), trade(280, '99.90', '1.5', 'sell', { lag: 10, id: 'p-early' })]
+          : [trade(280, '99.90', '1.5', 'sell', { lag: 20, id: 'p-early' }), trade(264, '99.90', '1.2', 'sell', { lag: 486, id: 'p-late' })];
+      const fx = makeFixture([...flatBooks(0, 3000, '99.90', '99.92', 100, { bidSize: '2' }), ...pre, trade(700, '99.90', '2.5', 'sell', { id: 'p-post' })], { durationMs: 3000 });
+      return replay({
+        fixture: fx,
+        policy: fixedQuotePolicy({ bid: '99.90', qty: '1', pullTicks: [1] }),
+        controller: null,
+        config: testConfig({ steering: 'disabled' }),
+      });
+    };
+    const inOrder = await run('in-order');
+    const reversed = await run('reversed');
+    const o2 = (r: Awaited<ReturnType<typeof run>>) => r.ledger.ofType('fill').filter((f) => f.orderId === 'o2').map((f) => [f.qty, f.queueAheadBefore, f.simTime - T0]);
+    expect(o2(inOrder)).toEqual([['0.500000', '2.000000', 700]]);
+    expect(o2(reversed)).toEqual(o2(inOrder));
+    expect(inOrder.ledger.ofType('order_live').find((e) => e.orderId === 'o2')!.queueAhead).toBe('2.000000');
+    expect(reversed.ledger.ofType('order_live').find((e) => e.orderId === 'o2')!.queueAhead).toBe('2.000000');
+    for (const r of [inOrder, reversed]) {
+      expect(Ledger.verify(r.ledger.all())).toEqual({ ok: true });
+      const p = r.summary.portfolio;
+      expect(parseMoney(p.netPnl)).toBe(parseMoney(p.grossRealized) + parseMoney(p.unrealized) - parseMoney(p.feesPaid) - parseMoney(p.txCostsPaid));
+    }
+  });
+});
