@@ -595,12 +595,15 @@ describe('N4: re-attributing pre-activation consumption must not double-count be
     const reversed = n4Harness('reversed');
     expect(() => inOrder.run()).not.toThrow();
     expect(() => reversed.run()).not.toThrow();
-    const liveQueue = (h: Harness) => {
+    const activation = (h: Harness) => {
       const live = h.events.find((e) => e.kind === 'order_live' && e.order.orderId === 'o2') as Extract<ExecutionEvent, { kind: 'order_live' }>;
-      return [live.order.displayedAtLive, live.order.queueAhead];
+      return {
+        displayed: live.order.displayedAtLive,
+        snapshot: live.order.levelQueueAtLive + live.order.betweenQueueInitial,
+      };
     };
-    expect(liveQueue(inOrder)).toEqual([parseQty('2'), parseQty('2')]);
-    expect(liveQueue(reversed)).toEqual([parseQty('2'), parseQty('2')]);
+    expect(activation(inOrder)).toEqual({ displayed: parseQty('2'), snapshot: parseQty('2') });
+    expect(activation(reversed)).toEqual({ displayed: parseQty('2'), snapshot: parseQty('2') });
     const o2 = (h: Harness) => fillsOf(h, 'o2').map((f) => [f.qty, f.queueAheadBefore, f.at - T0, f.sourceTrade.marketTime - T0]);
     expect(o2(inOrder)).toEqual([[parseQty('0.5'), parseQty('2'), 700, 700]]);
     expect(o2(reversed)).toEqual(o2(inOrder));

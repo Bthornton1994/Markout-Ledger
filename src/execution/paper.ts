@@ -41,10 +41,10 @@
  *   already there and behind its BETWEEN segment, max(0, displayed at its live time - current level queue),
  *   the growth of the level since the queue was captured. Queues only decrease through prints eligible for
  *   that order at that price; book snapshots never reduce them. A print whose venue time is at or before a
- *   later own order's liveAt is ineligible for it: if that print is observed after activation and consumes
- *   the shared level queue, the consumed size is added to that order's between segment so its queueAhead
- *   stays the volume displayed at liveAt. This keeps time priority among our own orders and makes every
- *   order's venue-ordered fill total monotone in the set of known prints.
+ *   later own order's liveAt is ineligible for it: after it consumes the shared level queue, that order's
+ *   between is set so queueAhead stays the volume displayed at liveAt. Re-attributing the same consumption
+ *   onto a later-observed earlier print therefore cannot stack. This keeps time priority among our own
+ *   orders and makes every order's venue-ordered fill total monotone in the set of known prints.
  * - A fill requires a printed trade at our price (after the queue ahead is exhausted) or through our price.
  *   A book touch never fills. A fill is never larger than the printed trade size.
  */
@@ -505,7 +505,8 @@ export class PaperExchange {
    * exchange state. Each price level is one FIFO: [level queue][own 1][between 2][own 2]...; better-priced
    * levels are served first; a print through a level sweeps it (queues to zero, eligible own orders filled
    * in time priority up to the print size). A print with marketTime <= liveAt that consumes the level
-   * queue after a later own order has activated is shifted into that order's between segment.
+   * queue after a later own order has activated restores that order's queueAhead to its
+   * activation snapshot (between is set to target minus the new level, not incremented).
    */
   private simulate(orders: PaperOrder[], trades: TradeEvent[]): SimResult {
     const states = new Map<string, SimState>(orders.map((o) => [o.orderId, { betweenQueue: o.ckptBetweenQueue, filled: o.ckptFilled }]));
@@ -531,7 +532,7 @@ export class PaperExchange {
         const through = side === 'buy' ? trade.price < price : trade.price > price;
         if (through) {
           levels.set(key, 0n);
-          this.shiftLevelIntoIneligibleBetween(orders, states, trade, side, price, levelBefore);
+          this.restoreIneligibleQueueAhead(orders, states, trade, side, price, 0n);
           for (const o of group) {
             const st = states.get(o.orderId)!;
             const queueBefore = levelBefore + st.betweenQueue;
@@ -548,7 +549,7 @@ export class PaperExchange {
         if (available <= levelBefore) {
           const levelAfter = levelBefore - available;
           levels.set(key, levelAfter);
-          this.shiftLevelIntoIneligibleBetween(orders, states, trade, side, price, available);
+          this.restoreIneligibleQueueAhead(orders, states, trade, side, price, levelAfter);
           for (const o of group) {
             const st = states.get(o.orderId)!;
             tradeRoles.set(o.orderId, { kind: 'queue_consumed', queueBefore: levelBefore + st.betweenQueue, queueAfter: levelAfter + st.betweenQueue, fill: 0n });
@@ -558,7 +559,7 @@ export class PaperExchange {
         }
         available -= levelBefore;
         levels.set(key, 0n);
-        this.shiftLevelIntoIneligibleBetween(orders, states, trade, side, price, levelBefore);
+        this.restoreIneligibleQueueAhead(orders, states, trade, side, price, 0n);
         for (const o of group) {
           if (available <= 0n) break;
           const st = states.get(o.orderId)!;
@@ -582,29 +583,27 @@ export class PaperExchange {
   }
 
   /**
-   * Keep queueAhead invariant for own orders that were not yet live at this print's venue time.
-   * The shared level queue is consumed for eligible orders; orders that activated later (or at this
-   * instant) must not see that consumption. If the print was observed after they went live, their
-   * between at liveAt did not include it, so move the consumed size into between. If it was already
-   * observed before liveAt, goLive captured the reduced level in between and we must not double-count.
+   * Keep queueAhead at the activation snapshot for own orders that were not yet live at this
+   * print's venue time. SET between so level+between equals that snapshot after the shared
+   * level moves. Adding the consumed size would double-count when a later-observed earlier
+   * print re-attributes consumption already reflected in between at liveAt.
    */
-  private shiftLevelIntoIneligibleBetween(
+  private restoreIneligibleQueueAhead(
     orders: PaperOrder[],
     states: Map<string, SimState>,
     trade: TradeEvent,
     side: Side,
     price: bigint,
-    consumedFromLevel: bigint,
+    levelAfter: bigint,
   ): void {
-    if (consumedFromLevel <= 0n) return;
     for (const o of orders) {
       if (o.side !== side || o.price !== price) continue;
       if (trade.marketTime > o.liveAt) continue;
-      if (trade.obsTime <= o.liveAt) continue;
       const st = states.get(o.orderId);
       if (!st || st.filled >= o.qty) continue;
       if (!this.isPriceRelevant(o, trade)) continue;
-      st.betweenQueue += consumedFromLevel;
+      const target = o.levelQueueAtLive + o.betweenQueueInitial;
+      st.betweenQueue = maxBig(0n, target - levelAfter);
     }
   }
 
