@@ -72,6 +72,7 @@ docs/           schema, accounting, execution model, controller contract, replay
 - [docs/CONTROLLER.md](docs/CONTROLLER.md): two-clock timing, instruction contract and bounds, acceptance rules, the LLM interface
 - [docs/REPLAY.md](docs/REPLAY.md): commands, flags, outputs, adding scenarios
 - [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md): limitations of the synthetic data and what real data a credible evaluation needs
+- Milestone 2 (recorded data, contract only, no implementation yet): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`
 
 ## Guarantees the tests establish
 
@@ -96,4 +97,4 @@ Each of these is a test in `tests/` that exercises the public interfaces rather 
 
 Milestone 1 delivers the engine, ledger contract and CLI. Not included by design: a dashboard, live data adapters, an actual model-backed controller, RL, order routing, or any credential handling. The synthetic generator is a test harness, not a market model.
 
-License: not yet chosen by the repository owner (`package.json` says `UNLICENSED`, private).
+License: not yet chosen by the repository owner. The repository is public; `package.json` still says `UNLICENSED` (and `private: true`, which only prevents npm publication). Until the owner picks a licence, no licence is granted.

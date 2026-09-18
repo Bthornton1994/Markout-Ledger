@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/fixture.v2.schema.json",
+  "title": "Markout Ledger replay fixture, schema version 2",
+  "description": "A fixture is JSONL: the first line matches #/$defs/header, every following line matches #/$defs/event. Version 2 adds capture provenance, instrument specification, rights and per-event raw references. Version 1 (synthetic) fixtures remain valid under the version-1 rules in docs/EVENT_SCHEMA.md. See docs/M2_DATA_CONTRACT.md section 6.",
+  "oneOf": [{ "$ref": "#/$defs/header" }, { "$ref": "#/$defs/event" }],
+  "$defs": {
+    "decimal": { "type": "string", "pattern": "^-?[0-9]+\\.[0-9]{1,6}$" },
+    "ms": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "software": { "type": "object", "required": ["name", "version"], "properties": { "name": { "type": "string" }, "version": { "type": "string" }, "commit": { "type": "string" } } },
+    "lagStats": { "type": "object", "required": ["min", "p1", "p50", "p99", "max", "count"], "properties": { "min": { "type": "integer" }, "p1": { "type": "integer" }, "p50": { "type": "integer" }, "p99": { "type": "integer" }, "max": { "type": "integer" }, "count": { "type": "integer" } } },
+    "header": {
+      "type": "object",
+      "required": ["type", "schemaVersion", "symbol", "venue", "venueSymbol", "priceScale", "qtyScale", "tickSize", "lotSize", "startTime", "endTime", "eventCount", "synthetic", "depth", "provenance"],
+      "properties": {
+        "type": { "const": "header" },
+        "schemaVersion": { "const": 2 },
+        "symbol": { "type": "string" },
+        "venue": { "type": "string" },
+        "venueSymbol": { "type": "string" },
+        "priceScale": { "const": 1000000 },
+        "qtyScale": { "const": 1000000 },
+        "tickSize": { "$ref": "#/$defs/decimal" },
+        "lotSize": { "$ref": "#/$defs/decimal" },
+        "startTime": { "$ref": "#/$defs/ms" },
+        "endTime": { "$ref": "#/$defs/ms" },
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "synthetic": { "type": "boolean" },
+        "syntheticLabel": { "type": "string" },
+        "depth": { "type": "integer", "minimum": 1 },
+        "provenance": {
+          "type": "object",
+          "required": ["source", "description", "timeBasis"],
+          "properties": {
+            "source": { "enum": ["synthetic", "recorded"] },
+            "description": { "type": "string" },
+            "generator": { "type": "string" },
+            "generatorVersion": { "type": "string" },
+            "seed": { "type": "integer" },
+            "recordedFrom": { "type": "string" },
+            "captureMethod": { "type": "string" },
+            "timeBasis": {
+              "type": "object",
+              "required": ["obsTime", "marketTime"],
+              "properties": { "obsTime": { "type": "string" }, "marketTime": { "type": "string" } }
+            }
+          }
+        },
+        "instrumentSpec": {
+          "type": "object",
+          "required": ["tickSize", "lotSize", "priceDecimals", "qtyDecimals", "aggressorSource", "tradeStreamGranularity", "source", "fetchedAtIso"],
+          "properties": {
+            "tickSize": { "$ref": "#/$defs/decimal" },
+            "lotSize": { "$ref": "#/$defs/decimal" },
+            "priceDecimals": { "type": "integer", "minimum": 0, "maximum": 6 },
+            "qtyDecimals": { "type": "integer", "minimum": 0, "maximum": 6 },
+            "aggressorSource": { "enum": ["maker_flag", "taker_side", "none"] },
+            "tradeStreamGranularity": { "enum": ["per_fill", "aggregated"] },
+            "source": { "type": "string" },
+            "fetchedAtIso": { "type": "string", "format": "date-time" }
+          }
+        },
+        "capture": {
+          "type": "object",
+          "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "capturer", "normalizer", "adapter", "clockSync", "lagStatsMs", "dropped", "cuts"],
+          "properties": {
+            "captureId": { "type": "string" },
+            "captureFormatVersion": { "const": 1 },
+            "rawFiles": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
+            "segmentIndex": { "type": "integer", "minimum": 0 },
+            "startReason": { "enum": ["capture_start", "resync_after_gap", "resync_after_clock_cut"] },
+            "endReason": { "enum": ["capture_end", "gap_sequence", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth"] },
+            "endRawRecord": { "type": "object", "properties": { "fileIndex": { "type": "integer" }, "record": { "type": "integer" } } },
+            "capturer": { "$ref": "#/$defs/software" },
+            "normalizer": { "$ref": "#/$defs/software" },
+            "adapter": { "$ref": "#/$defs/software" },
+            "clockSync": { "enum": ["synchronized", "unknown"] },
+            "clockReports": { "type": "object", "properties": { "start": {}, "end": {} } },
+            "lagStatsMs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/lagStats" } },
+            "dropped": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+            "cuts": { "type": "array", "items": { "type": "object", "required": ["reason", "fileIndex", "record"], "properties": { "reason": { "type": "string" }, "fileIndex": { "type": "integer" }, "record": { "type": "integer" }, "detail": { "type": "string" } } } },
+            "vendor": { "type": "object", "description": "only for timeBasis.obsTime = third_party_receive", "properties": { "name": { "type": "string" }, "captureLocation": { "type": "string" }, "licence": { "type": "string" } } }
+          }
+        },
+        "rights": {
+          "type": "object",
+          "required": ["termsUrl", "termsCheckedOn", "checkedBy", "redistribution", "publication"],
+          "properties": {
+            "termsUrl": { "type": "string" },
+            "termsCheckedOn": { "type": "string", "format": "date" },
+            "checkedBy": { "type": "string" },
+            "redistribution": { "enum": ["permitted", "prohibited", "unclear"] },
+            "publication": { "enum": ["hash_only", "sample_permitted"] },
+            "note": { "type": "string" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "synthetic": { "const": false } } },
+          "then": {
+            "required": ["instrumentSpec", "capture", "rights"],
+            "properties": {
+              "provenance": {
+                "required": ["recordedFrom", "captureMethod"],
+                "properties": { "source": { "const": "recorded" }, "timeBasis": { "properties": { "obsTime": { "enum": ["capture_receive", "third_party_receive"] } } } }
+              }
+            }
+          },
+          "else": { "required": ["syntheticLabel"], "properties": { "provenance": { "properties": { "source": { "const": "synthetic" } } } } }
+        }
+      ]
+    },
+    "eventBase": {
+      "type": "object",
+      "required": ["type", "eventId", "seq", "obsTime", "marketTime", "symbol", "venue"],
+      "properties": {
+        "eventId": { "type": "string" },
+        "seq": { "type": "integer", "minimum": 1 },
+        "obsTime": { "$ref": "#/$defs/ms" },
+        "marketTime": { "$ref": "#/$defs/ms" },
+        "blockNumber": { "type": "integer" },
+        "symbol": { "type": "string" },
+        "venue": { "type": "string" },
+        "venueSeq": { "type": "string" },
+        "rawRef": { "type": "object", "required": ["fileIndex", "record"], "properties": { "fileIndex": { "type": "integer" }, "record": { "type": "integer" } } },
+        "recvWallNs": { "type": "string", "pattern": "^[0-9]{1,20}$" }
+      }
+    },
+    "level": { "type": "object", "required": ["price", "size"], "properties": { "price": { "$ref": "#/$defs/decimal" }, "size": { "$ref": "#/$defs/decimal" } } },
+    "event": {
+      "oneOf": [
+        {
+          "allOf": [
+            { "$ref": "#/$defs/eventBase" },
+            { "properties": { "type": { "const": "book" }, "bids": { "type": "array", "items": { "$ref": "#/$defs/level" } }, "asks": { "type": "array", "items": { "$ref": "#/$defs/level" } } }, "required": ["bids", "asks"] }
+          ]
+        },
+        {
+          "allOf": [
+            { "$ref": "#/$defs/eventBase" },
+            { "properties": { "type": { "const": "trade" }, "tradeId": { "type": "string" }, "price": { "$ref": "#/$defs/decimal" }, "size": { "$ref": "#/$defs/decimal" }, "aggressor": { "enum": ["buy", "sell", "unknown"] } }, "required": ["tradeId", "price", "size", "aggressor"] }
+          ]
+        }
+      ]
+    }
+  }
+}
