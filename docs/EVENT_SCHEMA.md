@@ -60,11 +60,11 @@ The engine consumes the fixture lazily, in file order, and validates each event 
 
 | reason | phase | condition |
 |---|---|---|
-| `duplicate_event` | structural | `eventId` already seen (logged at the event's obsTime) |
-| `non_increasing_seq` | structural | `seq` not greater than the previous event's (at the event's obsTime) |
+| `duplicate_event` | structural | `eventId` already seen, whether or not the earlier event was accepted (logged at the event's obsTime) |
+| `non_increasing_seq` | structural | `seq` not greater than every previous event's, accepted or rejected (at the event's obsTime) |
 | `out_of_order` | structural | `obsTime` earlier than the stream position (at the time it is encountered) |
 | `outside_replay_range` | structural | `obsTime` before `startTime` (at replay start) |
-| `invalid_timestamps` | content | `obsTime < marketTime` or non-integer timestamps |
+| `invalid_timestamps` | content | `obsTime < marketTime` or a non-integer `obsTime` / `marketTime` |
 | `malformed_event` | content | non-positive price/size, unsorted levels, bad aggressor |
 | `crossed_book` | content | best bid >= best ask |
 | `wrong_symbol` | content | symbol differs from the header |

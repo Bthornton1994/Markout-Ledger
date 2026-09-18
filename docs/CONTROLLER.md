@@ -15,7 +15,7 @@ instruction        readyAt = T + modeled latency; must be <= T + controllerDeadl
 
 At one simulated millisecond the order is fixed by the scheduler: market observations, then order-state transitions, then outcome measurements, then the controller boundary, then the policy tick. So the controller's review of window `k` includes every observation with `obsTime <= T`, and its instruction can be used by the very first tick of window `k+1` when the modeled latency is zero. With latency `L > 0` the first `ceil(L / tick)` ticks of the next window still run on the prior instruction; the window summary lists every version used (`instructionVersionsUsed`).
 
-The controller is invoked exactly once per completed window that has a successor and never from the tick path. Its wall-clock duration is measured for diagnostics but kept out of the ledger; only the **modeled** latency (`simulatedLatencyMs` on the proposal, or the controller's `modeledLatencyMs`) drives the deadline check.
+The controller is invoked exactly once per completed window that has a successor and never from the tick path. Its wall-clock duration is measured for diagnostics but kept out of the ledger; only the **modeled** latency (`simulatedLatencyMs` on the proposal, or the controller's `modeledLatencyMs`) drives the deadline check. The controller receives **copies** of the review and of the prior instruction: nothing it does to those objects can change the instruction in effect or the ledger entries that already hash them (ledger entries are frozen recursively).
 
 ## What the controller sees: `WindowReview`
 

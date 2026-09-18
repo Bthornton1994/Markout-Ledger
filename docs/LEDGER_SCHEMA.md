@@ -33,7 +33,7 @@ Orders and execution (one entry per state transition)
 - `order_proposed`: the policy's desired quote after reconciling with resting orders.
 - `order_rejected`: `rejectedBy: risk_gate | venue`, `reason`, `detail`. Risk reasons: `kill_switch_active`, `order_size_limit`, `invalid_qty`, `invalid_price`, `position_limit`. Venue reasons: `post_only_would_cross`, `no_book`.
 - `order_submitted`: `orderId`, `expectedLiveAt`, `placementCost`.
-- `order_live`: `liveAt` (venue time), `queueAhead`, `queueSource`, the book event used with its `bookMarketTime` and `bookLagMs`, and the fill-uncertainty note.
+- `order_live`: `liveAt` (venue time), `queueAhead` (effective external volume ahead: level queue + between segment), `displayedAtLive`, `levelQueueAhead`, `betweenQueue`, `ownOrdersAhead`, `queueSource`, the book event used with its `bookMarketTime` and `bookLagMs`, and the fill-uncertainty note.
 - `cancel_requested`: `expectedEffectiveAt`, `cancelCost`, reason (`requote | withdraw | pull | kill_switch`).
 - `cancel_effective` (with `finalAt`: until then the cancel is provisional and a late fill can still arrive), `cancel_too_late` (`already_filled | already_cancelled | already_rejected`).
 - `cancel_fill_race`: a trade filled an order with a cancel in flight or already effective; `outcome: fill_wins_before_cancel | fill_wins_tie | late_fill_after_cancel_effective`, `tradeMarketTime`, `tradeObsTime`, and the rule.
@@ -47,7 +47,7 @@ Orders and execution (one entry per state transition)
 Outcomes and risk
 
 - `outcome`: markout of a fill portion at `horizonMs` (`fillId`, `portionId`, `sourceTradeEventId`). The horizon runs on the source print's venue time: `availableAt = max(sourceMarketTime + horizonMs, observedAt)`. The mid is the latest observed book whose `marketTime` does not exceed the horizon (`midSelection: venue_time`; `midMarketTime`, `midObsTime`, `midEventId`), falling back to the latest observed book if none qualifies; `status: measured | unmeasurable_no_book | superseded_by_reattribution` (the portion's quantity moved to another source before this horizon elapsed; not counted).
-- `risk_breach`: `kind: loss_limit` (kill switch tripped) or `position_overrun` (a fill, typically a late fill on a provisionally cancelled order, pushed inventory past the position limit; no kill switch, increasing orders are rejected from then on).
+- `risk_breach`: `kind: loss_limit` (kill switch tripped) or `position_overrun` (a fill, typically a late fill on a provisionally cancelled order, pushed inventory past the position limit; logged on the fill that crossed it, not on later fills that reduce the position; no kill switch, increasing orders are rejected from then on, reducing orders are allowed).
 
 Slow controller
 

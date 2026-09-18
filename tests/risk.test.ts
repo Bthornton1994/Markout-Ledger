@@ -14,6 +14,18 @@ describe('risk gate', () => {
     expect(short).toMatchObject({ ok: false, reason: 'position_limit' });
   });
 
+  it('always allows an order that reduces the position, even when inventory already exceeds the limit', () => {
+    const g = new RiskGate({ ...DEFAULT_BASE.risk, maxPosition: parseQty('2'), maxOrderQty: parseQty('10'), maxLoss: parseMoney('10') });
+    const over = { inventory: parseQty('2.4'), openBuyQty: 0n, openSellQty: 0n }; // past max position 2 after a late fill
+    expect(g.checkOrder({ side: 'sell', price: parsePrice('100'), qty: parseQty('0.5') }, over)).toEqual({ ok: true }); // -> 1.9
+    expect(g.checkOrder({ side: 'sell', price: parsePrice('100'), qty: parseQty('1.5') }, over)).toEqual({ ok: true }); // -> 0.9
+    expect(g.checkOrder({ side: 'buy', price: parsePrice('100'), qty: parseQty('0.5') }, over)).toMatchObject({ reason: 'position_limit' });
+    // flipping through zero is judged on where it lands: within the limit passes, beyond it is blocked even if |projected| < |inventory|
+    expect(g.checkOrder({ side: 'sell', price: parsePrice('100'), qty: parseQty('1.5') }, { ...over, inventory: parseQty('0.5') })).toEqual({ ok: true }); // -> -1.0 within limit
+    expect(g.checkOrder({ side: 'sell', price: parsePrice('100'), qty: parseQty('4.5') }, over)).toMatchObject({ reason: 'position_limit' }); // 2.4 -> -2.1: smaller in size but past the limit on the other side
+    expect(g.checkOrder({ side: 'sell', price: parsePrice('100'), qty: parseQty('1.5') }, { ...over, inventory: parseQty('-1') })).toMatchObject({ reason: 'position_limit' }); // -> -2.5
+  });
+
   it('rejects malformed and oversized orders', () => {
     const g = gate();
     const ctx = { inventory: 0n, openBuyQty: 0n, openSellQty: 0n };

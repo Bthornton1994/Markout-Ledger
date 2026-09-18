@@ -3,6 +3,15 @@ import { LEDGER_SCHEMA_VERSION, type LedgerEntry, type LedgerEvent, type LedgerE
 
 export const GENESIS_HASH = '0'.repeat(64);
 
+/** Freeze an entry and every plain object/array it contains, so no later mutation can diverge from its hash. */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value as Record<string, unknown>)) deepFreeze(v);
+  }
+  return value;
+}
+
 /**
  * Append-only ledger with a SHA-256 hash chain. Entries are frozen on append.
  * An optional sink receives each entry as a JSONL line as soon as it is appended.
@@ -25,7 +34,7 @@ export class Ledger {
       prevHash: this.lastHash,
     };
     const hash = sha256Hex(canonicalJson(body));
-    const entry = Object.freeze({ ...body, hash }) as LedgerEntry & E;
+    const entry = deepFreeze({ ...body, hash }) as LedgerEntry & E;
     this.entries.push(entry);
     this.lastHash = hash;
     this.lastTime = event.simTime;

@@ -81,7 +81,7 @@ Each of these is a test in `tests/` that exercises the public interfaces rather 
 - fill outcomes are unavailable to the controller until their measurement horizon has elapsed
 - a steering instruction affects only the next window, applies from the first tick at or after it is ready, and is discarded when late, failed or invalid
 - replay is deterministic (byte-identical ledgers; committed fixtures regenerate from their seeds)
-- a book touch alone never creates a fill; a print at our price fills only past the displayed queue; a fill never exceeds the print
+- a book touch alone never creates a fill; a print at our price fills only past the displayed queue; a fill never exceeds the print; own orders at one price form a single FIFO, so time priority holds and a late earlier print can never break per-order monotonicity
 - fill eligibility is decided on venue time: a trade printed before an order was live cannot fill it even if observed afterwards; a trade printed while live but observed after the cancel took effect is a late fill
 - prints observed out of venue order are matched in venue order within a bounded window (the audit's Case B awards 0.300, not 1.000); awards only ever grow, so decisions stay causal
 - every booked quantity cites its actual source print and venue time, never beyond that print's size, and becomes known only when the print that establishes it is observed; a later-observed earlier print that re-splits booked quantity moves provenance and outcome horizons without touching accounting, and configuration refuses horizons shorter than the staleness window so an outcome is never measured before its provenance has settled

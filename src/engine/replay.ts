@@ -122,6 +122,8 @@ interface FillPortion {
   /** Sim time the portion was booked or re-attributed. */
   observedAt: number;
   measured: Set<number>;
+  /** Horizons scheduled and still counted as pending. */
+  pending: Set<number>;
 }
 
 interface BookRef {
@@ -460,7 +462,11 @@ class ReplayEngine {
           qty: fmtQty(o.qty),
           liveAt: ev.at,
           queueAhead: fmtQty(o.queueAhead),
-          queueSource: 'displayed size at our price level in the latest observed book at live time (0 if level absent)',
+          displayedAtLive: fmtQty(o.displayedAtLive),
+          levelQueueAhead: fmtQty(o.levelQueueAtLive),
+          betweenQueue: fmtQty(o.betweenQueueInitial),
+          ownOrdersAhead: o.ownOrdersAheadAtLive,
+          queueSource: 'level FIFO: level queue = displayed size when the first own order went live; between = level growth behind own orders ahead of us; both reduced only by eligible prints at this price',
           bookEventId: o.queueBookEventId,
           bookMarketTime: o.queueBookMarketTime,
           bookLagMs: o.queueBookMarketTime === null ? null : ev.at - o.queueBookMarketTime,
@@ -659,10 +665,12 @@ class ReplayEngine {
       sourceMarketTime: ev.sourceTrade.marketTime,
       observedAt: this.now,
       measured: new Set(),
+      pending: new Set(),
     };
     this.portions.push(portion);
     for (const h of this.cfg.outcomeHorizonsMs) this.scheduleOutcome(portion, h);
-    if (absBig(app.inventoryAfter) > this.cfg.risk.maxPosition) {
+    const inventoryBefore = app.inventoryAfter - (o.side === 'buy' ? ev.qty : -ev.qty);
+    if (absBig(app.inventoryAfter) > this.cfg.risk.maxPosition && absBig(app.inventoryAfter) > absBig(inventoryBefore)) {
       this.totals.positionOverruns++;
       this.ledger.append({
         type: 'risk_breach',
@@ -681,6 +689,7 @@ class ReplayEngine {
   private scheduleOutcome(portion: FillPortion, horizonMs: number): void {
     const at = Math.max(this.now, portion.sourceMarketTime + horizonMs);
     this.pendingOutcomes++;
+    portion.pending.add(horizonMs);
     if (at <= this.end) this.scheduler.schedule(at, Priority.OUTCOME, () => this.measureOutcome(portion, horizonMs));
   }
 
@@ -697,6 +706,11 @@ class ReplayEngine {
       const take = from.qty < remaining ? from.qty : remaining;
       from.qty -= take;
       remaining -= take;
+      if (from.qty === 0n) {
+        // Nothing is left to measure on the old source: its unmeasured horizons are no longer pending.
+        this.pendingOutcomes -= from.pending.size;
+        from.pending.clear();
+      }
       const to: FillPortion = {
         portionId: `p${++this.portionSeq}`,
         fillId: from.fillId,
@@ -708,6 +722,7 @@ class ReplayEngine {
         sourceMarketTime: ev.toTrade.marketTime,
         observedAt: this.now,
         measured: new Set(),
+        pending: new Set(),
       };
       this.portions.push(to);
       const outcomesRebased: number[] = [];
@@ -756,7 +771,7 @@ class ReplayEngine {
   }
 
   private measureOutcome(fill: FillPortion, horizonMs: number): void {
-    this.pendingOutcomes--;
+    if (fill.pending.delete(horizonMs)) this.pendingOutcomes--;
     fill.measured.add(horizonMs);
     const chosen = fill.qty > 0n ? this.bookAtVenueTime(fill.sourceMarketTime + horizonMs) : null;
     const fillNotional = notional(fill.price, fill.qty);
@@ -1153,8 +1168,9 @@ class ReplayEngine {
       return;
     }
 
+    // The controller receives copies: the accepted instruction and the logged review are immutable records.
     const ctx: ControllerContext = {
-      priorInstruction: prior,
+      priorInstruction: structuredClone(prior),
       nextWindow,
       nextVersion: prior.version + 1,
       bounds: INSTRUCTION_BOUNDS,
@@ -1164,7 +1180,7 @@ class ReplayEngine {
     const wall0 = performance.now();
     let proposal;
     try {
-      proposal = await this.controller.decide(review, ctx);
+      proposal = await this.controller.decide(structuredClone(review), ctx);
     } catch (err) {
       this.controllerWallMs.push(performance.now() - wall0);
       this.totals.rejectedFailed++;

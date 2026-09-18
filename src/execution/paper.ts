@@ -35,13 +35,17 @@
  *
  * FILL RULES
  * - Orders are post-only limit orders. An order that would cross the book when it goes live is rejected.
- * - Queue position is unknown from L2 data, so we assume BACK OF QUEUE: queueAhead = displayed size at our
- *   price level in the latest observed book at live time (0 if the level does not exist). queueAhead only
- *   decreases through eligible prints at our price; book snapshots never reduce it.
- * - A fill requires a printed trade at our price (after queueAhead is exhausted) or through our price.
+ * - Queue position is unknown from L2 data, so we assume BACK OF QUEUE. Each price level we rest on is one
+ *   FIFO: [level queue][own order 1][between 2][own order 2]... The LEVEL QUEUE is the displayed size at the
+ *   level when the first own order went live; a later own order at the same level sits behind the own orders
+ *   already there and behind its BETWEEN segment, max(0, displayed at its live time - current level queue),
+ *   the growth of the level since the queue was captured. Queues only decrease through eligible prints at
+ *   that price; book snapshots never reduce them. This keeps time priority among our own orders and makes
+ *   every order's venue-ordered fill total monotone in the set of known prints.
+ * - A fill requires a printed trade at our price (after the queue ahead is exhausted) or through our price.
  *   A book touch never fills. A fill is never larger than the printed trade size.
  */
-import { type Decimal, feeOn, fmtMoney, fmtPrice, fmtQty, minBig, notional } from '../core/money.js';
+import { type Decimal, feeOn, fmtMoney, fmtPrice, fmtQty, maxBig, minBig, notional } from '../core/money.js';
 import { Priority, type Scheduler } from '../core/scheduler.js';
 import type { Side } from '../core/side.js';
 import type { BookEvent, TradeEvent } from '../market/events.js';
@@ -89,7 +93,7 @@ export function executionConfigToWire(c: ExecutionConfig): ExecutionConfigWire {
 }
 
 export const QUEUE_MODEL =
-  'pessimistic_back_of_queue: queueAhead = displayed level size in the latest observed book at live time; reduced only by eligible prints at our price';
+  'pessimistic_back_of_queue: each price level is one FIFO; level queue = displayed size when the first own order went live, later own orders sit behind earlier own orders plus the level growth since; queues are reduced only by eligible prints at that price';
 export const MATCHING_MODEL =
   'venue_ordered_bounded_window: prints are matched in venue-time order within a window of maxTradeLagMs; fills are awarded incrementally as the venue-ordered total grows, at the observation time of the print that establishes them';
 export const ELIGIBILITY_RULE =
@@ -144,9 +148,17 @@ export interface PaperOrder {
   submittedAt: number;
   /** Venue time the order rests on the book. */
   liveAt: number;
-  /** Displayed size ahead of us at live time (initial queue estimate). */
-  queueAheadInitial: bigint;
-  /** Queue estimate after the latest venue-ordered recompute over the known prints. */
+  /** Displayed size at our level in the latest observed book when we went live (raw estimate). */
+  displayedAtLive: bigint;
+  /** Level queue (external volume ahead of the first own order at this level) when we went live. */
+  levelQueueAtLive: bigint;
+  /** Own orders already resting at this level when we went live. */
+  ownOrdersAheadAtLive: number;
+  /** Our BETWEEN segment when we went live: level growth behind the own orders ahead of us. */
+  betweenQueueInitial: bigint;
+  /** Current between segment after the latest venue-ordered recompute. */
+  betweenQueue: bigint;
+  /** Effective external volume ahead of us after the latest recompute: level queue + between segment. */
   queueAhead: bigint;
   queueBookEventId: string | null;
   queueBookMarketTime: number | null;
@@ -155,8 +167,8 @@ export interface PaperOrder {
   cancelEffectiveAt: number | null;
   /** Sim time after which no late print can be matched to this order (cancelEffectiveAt + maxTradeLagMs). */
   finalAt: number | null;
-  /** Matching checkpoint: queue and filled quantity after every print with venue time below the side's fold cut. */
-  ckptQueueAhead: bigint;
+  /** Matching checkpoint: between segment and filled quantity after every print with venue time below the side's fold cut. */
+  ckptBetweenQueue: bigint;
   ckptFilled: bigint;
   /** Booked quantity per source print (the print that filled us in venue order). Values sum to filledQty. */
   awardedBySource: Map<string, { trade: TradeEvent; qty: bigint }>;
@@ -221,8 +233,15 @@ interface SideMatcher {
 }
 
 interface SimState {
-  queueAhead: bigint;
+  betweenQueue: bigint;
   filled: bigint;
+}
+
+interface LevelState {
+  /** External volume ahead of the first own order at this level, after every folded print. */
+  ckptQueueAhead: bigint;
+  /** ...after the latest recompute over the window prints. */
+  queueAhead: bigint;
 }
 
 interface Role {
@@ -234,8 +253,14 @@ interface Role {
 
 interface SimResult {
   states: Map<string, SimState>;
+  /** Level queue after the simulated prints, keyed by level. */
+  levels: Map<string, bigint>;
   /** roles.get(tradeEventId).get(orderId) */
   roles: Map<string, Map<string, Role>>;
+}
+
+function levelKey(side: Side, price: bigint): string {
+  return `${side}@${price}`;
 }
 
 export class PaperExchange {
@@ -244,8 +269,12 @@ export class PaperExchange {
     buy: { trades: [], cut: Number.NEGATIVE_INFINITY },
     sell: { trades: [], cut: Number.NEGATIVE_INFINITY },
   };
+  private readonly levels = new Map<string, LevelState>();
   private nextId = 1;
   private readonly maxTradeLagMs: number;
+  /** True while onTrade is matching; cancels requested meanwhile are applied after the matching loop. */
+  private matching = false;
+  private readonly deferredCancels: PaperOrder[] = [];
 
   constructor(
     readonly config: ExecutionConfig,
@@ -278,14 +307,18 @@ export class PaperExchange {
       isLive: false,
       submittedAt: now,
       liveAt: now + this.config.orderLatencyMs,
-      queueAheadInitial: 0n,
+      displayedAtLive: 0n,
+      levelQueueAtLive: 0n,
+      ownOrdersAheadAtLive: 0,
+      betweenQueueInitial: 0n,
+      betweenQueue: 0n,
       queueAhead: 0n,
       queueBookEventId: null,
       queueBookMarketTime: null,
       cancelRequestedAt: null,
       cancelEffectiveAt: null,
       finalAt: null,
-      ckptQueueAhead: 0n,
+      ckptBetweenQueue: 0n,
       ckptFilled: 0n,
       awardedBySource: new Map(),
     };
@@ -305,8 +338,21 @@ export class PaperExchange {
     order.cancelEffectiveAt = Math.max(now + this.config.cancelLatencyMs, order.liveAt);
     order.state = 'cancel_pending';
     this.emit({ kind: 'cancel_requested', order, cost: this.config.cancelCost, at: now, effectiveAt: order.cancelEffectiveAt, reason });
-    this.later(order.cancelEffectiveAt, now, () => this.applyCancel(order));
+    if (this.matching) this.deferredCancels.push(order);
+    else this.applyOrScheduleCancel(order, now);
     return true;
+  }
+
+  /**
+   * A cancel takes effect immediately only when its effective time is now AND the order is already
+   * acknowledged; a pending order whose liveAt is this same instant must go live first (the scheduler
+   * runs the earlier-scheduled goLive before a cancel scheduled now), so its ledger lifecycle stays
+   * order_live -> cancel_effective.
+   */
+  private applyOrScheduleCancel(order: PaperOrder, now: number): void {
+    const at = order.cancelEffectiveAt ?? now;
+    if (at <= now && order.isLive) this.applyCancel(order);
+    else this.scheduler.schedule(Math.max(at, now), Priority.EXCHANGE, () => this.applyCancel(order));
   }
 
   /** Run a venue transition at `at`: immediately when it falls on the current instant (zero latency), else scheduled. */
@@ -346,8 +392,26 @@ export class PaperExchange {
         `print ${trade.eventId} lags ${trade.obsTime - trade.marketTime}ms > maxTradeLagMs ${this.maxTradeLagMs}; discard it via noteDiscardedTrade`,
       );
     }
+    this.matching = true;
+    try {
+      this.matchTrade(trade, now);
+    } finally {
+      this.matching = false;
+      const deferred = this.deferredCancels.splice(0);
+      for (const o of deferred) this.applyOrScheduleCancel(o, now);
+    }
+  }
+
+  private matchTrade(trade: TradeEvent, now: number): void {
     for (const side of ['buy', 'sell'] as const) {
       this.fold(side, now);
+      // Orders not yet acknowledged whose liveAt is this instant: the print cannot fill them, but the
+      // ledger records why (the print predates or coincides with activation on venue time).
+      for (const o of this.orders.values()) {
+        if (o.side !== side || o.isLive || o.state === 'rejected' || o.liveAt > now || !this.isPriceRelevant(o, trade)) continue;
+        const reason: IneligibleReason = trade.marketTime < o.liveAt ? 'predates_activation' : 'at_activation_instant';
+        this.emit({ kind: 'fill_ineligible', order: o, trade, reason, at: now });
+      }
       const simOrders = this.simulationOrders(side);
       const relevant = simOrders.filter((o) => this.isPriceRelevant(o, trade));
       if (relevant.length === 0) continue;
@@ -369,7 +433,8 @@ export class PaperExchange {
 
       const matcher = this.sides[side];
       insertVenueOrdered(matcher.trades, trade);
-      const { states, roles } = this.simulate(simOrders, matcher.trades);
+      const { states, levels, roles } = this.simulate(simOrders, matcher.trades);
+      for (const [key, q] of levels) this.levels.get(key)!.queueAhead = q;
       const tradeRoles = roles.get(trade.eventId);
       // Award in price-time priority so same-instant fills are ledgered in the order the venue would report them.
       const inPriority = [...simOrders].sort((a, b) => {
@@ -382,7 +447,8 @@ export class PaperExchange {
         if (st.filled < o.filledQty) {
           throw new Error(`matching invariant broken: venue-ordered total ${st.filled} below awarded ${o.filledQty} for ${o.orderId}`);
         }
-        o.queueAhead = st.queueAhead;
+        o.betweenQueue = st.betweenQueue;
+        o.queueAhead = (levels.get(levelKey(o.side, o.price)) ?? 0n) + st.betweenQueue;
         if (role && role.kind === 'queue_consumed') {
           this.emit({ kind: 'queue_consumed', order: o, trade, queueAheadBefore: role.queueBefore, queueAheadAfter: role.queueAfter, at: now });
         }
@@ -400,7 +466,7 @@ export class PaperExchange {
    */
   noteDiscardedTrade(trade: TradeEvent, now: number): void {
     for (const o of this.orders.values()) {
-      if (!o.isLive || !this.isPriceRelevant(o, trade) || !this.eligibleAt(o, trade.marketTime)) continue;
+      if (!o.isLive || o.filledQty >= o.qty || !this.isPriceRelevant(o, trade) || !this.eligibleAt(o, trade.marketTime)) continue;
       this.emit({ kind: 'fill_uncertain', order: o, trade, reason: 'stale_print_discarded', at: now });
     }
   }
@@ -431,49 +497,81 @@ export class PaperExchange {
     });
   }
 
-  /** Venue-ordered matching from the orders' checkpoints over `trades`. Pure: does not touch order state. */
+  /**
+   * Venue-ordered matching from the orders' and levels' checkpoints over `trades`. Pure: touches no
+   * exchange state. Each price level is one FIFO: [level queue][own 1][between 2][own 2]...; better-priced
+   * levels are served first; a print through a level sweeps it (queues to zero, own orders filled in time
+   * priority up to the print size).
+   */
   private simulate(orders: PaperOrder[], trades: TradeEvent[]): SimResult {
-    const states = new Map<string, SimState>(orders.map((o) => [o.orderId, { queueAhead: o.ckptQueueAhead, filled: o.ckptFilled }]));
+    const states = new Map<string, SimState>(orders.map((o) => [o.orderId, { betweenQueue: o.ckptBetweenQueue, filled: o.ckptFilled }]));
+    const levels = new Map<string, bigint>();
+    for (const o of orders) {
+      const key = levelKey(o.side, o.price);
+      if (!levels.has(key)) levels.set(key, this.levels.get(key)?.ckptQueueAhead ?? 0n);
+    }
     const roles = new Map<string, Map<string, Role>>();
     for (const trade of trades) {
       let available = trade.size;
-      const cands = orders
-        .filter((o) => this.eligibleAt(o, trade.marketTime) && this.isPriceRelevant(o, trade) && states.get(o.orderId)!.filled < o.qty)
-        .sort((a, b) => {
-          if (a.price !== b.price) return a.side === 'buy' ? (a.price > b.price ? -1 : 1) : a.price < b.price ? -1 : 1;
-          return a.liveAt - b.liveAt;
-        });
+      const cands = orders.filter((o) => this.eligibleAt(o, trade.marketTime) && this.isPriceRelevant(o, trade) && states.get(o.orderId)!.filled < o.qty);
       const tradeRoles = new Map<string, Role>();
       roles.set(trade.eventId, tradeRoles);
-      for (const o of cands) {
+      if (cands.length === 0) continue;
+      const side = cands[0]!.side;
+      const prices = [...new Set(cands.map((o) => o.price))].sort((a, b) => (side === 'buy' ? (a > b ? -1 : 1) : a < b ? -1 : 1));
+      for (const price of prices) {
         if (available <= 0n) break;
-        const st = states.get(o.orderId)!;
-        const remaining = o.qty - st.filled;
-        const through = o.side === 'buy' ? trade.price < o.price : trade.price > o.price;
-        const queueBefore = st.queueAhead;
-        let fill = 0n;
-        let kind: Role['kind'];
+        const key = levelKey(side, price);
+        const group = cands.filter((o) => o.price === price).sort((a, b) => a.liveAt - b.liveAt);
+        const levelBefore = levels.get(key) ?? 0n;
+        const through = side === 'buy' ? trade.price < price : trade.price > price;
         if (through) {
-          st.queueAhead = 0n;
-          fill = minBig(remaining, available);
-          kind = 'through';
-        } else if (available <= st.queueAhead) {
-          st.queueAhead -= available;
-          tradeRoles.set(o.orderId, { kind: 'queue_consumed', queueBefore, queueAfter: st.queueAhead, fill: 0n });
-          available = 0n;
+          levels.set(key, 0n);
+          for (const o of group) {
+            const st = states.get(o.orderId)!;
+            const queueBefore = levelBefore + st.betweenQueue;
+            st.betweenQueue = 0n;
+            if (available <= 0n) continue;
+            const fill = minBig(o.qty - st.filled, available);
+            st.filled += fill;
+            available -= fill;
+            tradeRoles.set(o.orderId, { kind: 'through', queueBefore, queueAfter: 0n, fill });
+          }
           continue;
-        } else {
-          const excess = available - st.queueAhead;
-          st.queueAhead = 0n;
-          fill = minBig(remaining, excess);
-          kind = 'queue_exhausted';
         }
-        st.filled += fill;
-        available -= fill;
-        tradeRoles.set(o.orderId, { kind, queueBefore, queueAfter: st.queueAhead, fill });
+        // At our price: the level queue absorbs first, then each own order's between segment, then the order.
+        if (available <= levelBefore) {
+          const levelAfter = levelBefore - available;
+          levels.set(key, levelAfter);
+          for (const o of group) {
+            const st = states.get(o.orderId)!;
+            tradeRoles.set(o.orderId, { kind: 'queue_consumed', queueBefore: levelBefore + st.betweenQueue, queueAfter: levelAfter + st.betweenQueue, fill: 0n });
+          }
+          available = 0n;
+          break;
+        }
+        available -= levelBefore;
+        levels.set(key, 0n);
+        for (const o of group) {
+          if (available <= 0n) break;
+          const st = states.get(o.orderId)!;
+          const queueBefore = levelBefore + st.betweenQueue;
+          if (available <= st.betweenQueue) {
+            st.betweenQueue -= available;
+            tradeRoles.set(o.orderId, { kind: 'queue_consumed', queueBefore, queueAfter: st.betweenQueue, fill: 0n });
+            available = 0n;
+            break;
+          }
+          available -= st.betweenQueue;
+          st.betweenQueue = 0n;
+          const fill = minBig(o.qty - st.filled, available);
+          st.filled += fill;
+          available -= fill;
+          tradeRoles.set(o.orderId, { kind: 'queue_exhausted', queueBefore, queueAfter: 0n, fill });
+        }
       }
     }
-    return { states, roles };
+    return { states, levels, roles };
   }
 
   /** Advance the side's cut to now - maxTradeLagMs, folding prints that can no longer be preceded into checkpoints. */
@@ -484,12 +582,13 @@ export class PaperExchange {
     const toFold = matcher.trades.filter((t) => t.marketTime < newCut);
     if (toFold.length > 0) {
       const orders = this.simulationOrders(side);
-      const { states } = this.simulate(orders, toFold);
+      const { states, levels } = this.simulate(orders, toFold);
       for (const o of orders) {
         const st = states.get(o.orderId)!;
-        o.ckptQueueAhead = st.queueAhead;
+        o.ckptBetweenQueue = st.betweenQueue;
         o.ckptFilled = st.filled;
       }
+      for (const [key, q] of levels) this.levels.get(key)!.ckptQueueAhead = q;
       matcher.trades = matcher.trades.filter((t) => t.marketTime >= newCut);
     }
     matcher.cut = newCut;
@@ -535,14 +634,16 @@ export class PaperExchange {
   private award(order: PaperOrder, sourceTrade: TradeEvent, establishedBy: TradeEvent, qty: bigint, role: Role | undefined, now: number): void {
     const n = notional(order.price, qty);
     const fee = feeOn(n, this.config.makerFeeBps);
-    const duringCancelPending = order.state === 'cancel_pending';
-    const afterCancelEffective = order.state === 'cancelled';
+    // A cancel that took effect at this very instant (zero latency, kill switch) is still a race at
+    // observation time: the late-fill row needs obsTime strictly after cancelEffectiveAt.
+    const duringCancelPending = order.state === 'cancel_pending' || (order.state === 'cancelled' && now === order.cancelEffectiveAt);
+    const afterCancelEffective = order.state === 'cancelled' && now > (order.cancelEffectiveAt ?? now);
     order.filledQty += qty;
     if (afterCancelEffective) {
       order.lateFilledQty += qty;
       this.emit({ kind: 'cancel_fill_race', order, trade: sourceTrade, at: now, outcome: 'late_fill_after_cancel_effective' });
     } else {
-      if (order.filledQty === order.qty) order.state = 'filled';
+      if (order.state !== 'cancelled' && order.filledQty === order.qty) order.state = 'filled';
       if (duringCancelPending) {
         const outcome: RaceOutcome = sourceTrade.marketTime === order.cancelEffectiveAt ? 'fill_wins_tie' : 'fill_wins_before_cancel';
         this.emit({ kind: 'cancel_fill_race', order, trade: sourceTrade, at: now, outcome });
@@ -589,11 +690,24 @@ export class PaperExchange {
       });
       return;
     }
-    const levels = order.side === 'buy' ? book.bids : book.asks;
-    const level = levels.find((l) => l.price === order.price);
-    order.queueAheadInitial = level ? level.size : 0n;
-    order.queueAhead = order.queueAheadInitial;
-    order.ckptQueueAhead = order.queueAheadInitial;
+    const bookLevels = order.side === 'buy' ? book.bids : book.asks;
+    const displayed = bookLevels.find((l) => l.price === order.price)?.size ?? 0n;
+    const key = levelKey(order.side, order.price);
+    const ownAhead = this.simulationOrders(order.side).filter((o) => o !== order && o.price === order.price && o.isLive);
+    let lvl = this.levels.get(key);
+    if (!lvl || ownAhead.length === 0) {
+      // First own order at this level (or the level had no own order left): the level queue is what is displayed now.
+      lvl = { ckptQueueAhead: displayed, queueAhead: displayed };
+      this.levels.set(key, lvl);
+    }
+    const between = ownAhead.length === 0 ? 0n : maxBig(0n, displayed - lvl.queueAhead);
+    order.displayedAtLive = displayed;
+    order.levelQueueAtLive = lvl.queueAhead;
+    order.ownOrdersAheadAtLive = ownAhead.length;
+    order.betweenQueueInitial = between;
+    order.betweenQueue = between;
+    order.ckptBetweenQueue = between;
+    order.queueAhead = lvl.queueAhead + between;
     order.ckptFilled = 0n;
     order.queueBookEventId = book.eventId;
     order.queueBookMarketTime = book.marketTime;

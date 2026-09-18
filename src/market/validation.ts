@@ -37,7 +37,7 @@ export function reject(reason: ObservationRejectReason, detail: string): Rejecti
 export function checkMalformed(ev: MarketEvent, header: FixtureHeader): Verdict {
   if (ev.symbol !== header.symbol) return reject('wrong_symbol', `expected ${header.symbol}, got ${ev.symbol}`);
   if (!Number.isInteger(ev.obsTime) || !Number.isInteger(ev.marketTime)) {
-    return reject('malformed_event', 'timestamps must be integer milliseconds');
+    return reject('invalid_timestamps', 'timestamps must be integer milliseconds');
   }
   if (ev.obsTime < ev.marketTime) {
     return reject('invalid_timestamps', `obsTime ${ev.obsTime} precedes marketTime ${ev.marketTime}`);
@@ -87,22 +87,24 @@ export class StreamValidator {
   constructor(private readonly header: FixtureHeader) {}
 
   checkOrder(ev: MarketEvent): Verdict {
-    if (!Number.isInteger(ev.obsTime)) return reject('malformed_event', 'obsTime must be an integer millisecond');
+    if (!Number.isInteger(ev.obsTime)) return reject('invalid_timestamps', 'obsTime must be an integer millisecond');
     if (ev.obsTime < this.streamObsTime) {
+      // Dropped, but it still occupied its id and seq in the file: later events must not reuse them.
+      this.seen.add(ev.eventId);
+      if (Number.isInteger(ev.seq) && ev.seq > this.lastSeq) this.lastSeq = ev.seq;
       return reject('out_of_order', `obsTime ${ev.obsTime} arrived after stream position ${this.streamObsTime}`);
     }
     this.streamObsTime = ev.obsTime;
     return { ok: true };
   }
 
+  /** Identity and seq are recorded for every event encountered, whether or not its content is accepted. */
   checkArrival(ev: MarketEvent): Verdict {
     if (this.seen.has(ev.eventId)) return reject('duplicate_event', `eventId ${ev.eventId} already seen`);
-    if (ev.seq <= this.lastSeq) return reject('non_increasing_seq', `seq ${ev.seq} after ${this.lastSeq}`);
-    const malformed = checkMalformed(ev, this.header);
-    if (!malformed.ok) return malformed;
     this.seen.add(ev.eventId);
+    if (ev.seq <= this.lastSeq) return reject('non_increasing_seq', `seq ${ev.seq} after ${this.lastSeq}`);
     this.lastSeq = ev.seq;
-    return { ok: true };
+    return checkMalformed(ev, this.header);
   }
 }
 

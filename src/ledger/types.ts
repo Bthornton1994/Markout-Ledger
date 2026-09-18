@@ -142,7 +142,16 @@ export interface OrderLiveEvent extends Base {
   price: Decimal;
   qty: Decimal;
   liveAt: number;
+  /** Effective external volume ahead of us at live time: level queue + our between segment. */
   queueAhead: Decimal;
+  /** Displayed size at our level in the book used (raw estimate). */
+  displayedAtLive: Decimal;
+  /** External volume ahead of the first own order at this level when we went live. */
+  levelQueueAhead: Decimal;
+  /** Our between segment: level growth behind the own orders ahead of us. */
+  betweenQueue: Decimal;
+  /** Own orders already resting at this level. */
+  ownOrdersAhead: number;
   queueSource: string;
   bookEventId: string | null;
   /** Venue time of the book used for the queue estimate; it may precede liveAt by the feed lag. */

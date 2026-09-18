@@ -66,7 +66,12 @@ export class RiskGate {
     }
     const projected =
       order.side === 'buy' ? ctx.inventory + ctx.openBuyQty + order.qty : ctx.inventory - ctx.openSellQty - order.qty;
-    if (absBig(projected) > this.config.maxPosition) {
+    // An order that moves inventory toward flat without crossing zero is always allowed, even when inventory
+    // already sits past the limit (a late fill can put it there). An order that flips through zero to the
+    // other side is judged on where it lands.
+    const sameSideOrFlat = projected === 0n || (projected > 0n) === (ctx.inventory > 0n);
+    const reduces = sameSideOrFlat && absBig(projected) < absBig(ctx.inventory);
+    if (absBig(projected) > this.config.maxPosition && !reduces) {
       return {
         ok: false,
         reason: 'position_limit',
