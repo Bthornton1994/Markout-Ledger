@@ -35,7 +35,7 @@ import { StreamValidator, checkStaleness, reject as rejectObservation, type Reje
 import type { FastPolicy, PolicyDecision, PolicyInput, RestingView } from '../policy/types.js';
 import { Portfolio, valuationToWire, type Mark } from '../portfolio/accounting.js';
 import { RiskGate } from '../risk/gate.js';
-import { configToWire, validateReplayConfig, type ReplayConfig } from './config.js';
+import { configToWire, validateReplayConfigAgainstFixture, type ReplayConfig } from './config.js';
 import type { RunSummary, WindowRow } from './summary.js';
 
 export interface ReplayDeps {
@@ -222,7 +222,8 @@ class ReplayEngine {
   };
 
   constructor(deps: ReplayDeps) {
-    validateReplayConfig(deps.config);
+    // Validation comes first: on a rejected configuration nothing below is constructed and nothing is written.
+    const numWindows = validateReplayConfigAgainstFixture(deps.config, deps.fixture.header);
     this.cfg = deps.config;
     this.fixture = deps.fixture;
     this.policy = deps.policy;
@@ -237,10 +238,7 @@ class ReplayEngine {
     const h = this.fixture.header;
     this.validator = new StreamValidator(h);
     this.start = h.startTime;
-    const coverable = Math.floor((h.endTime - h.startTime) / this.cfg.windowMs);
-    this.numWindows = this.cfg.numWindows ?? coverable;
-    if (this.numWindows < 1) throw new RangeError('fixture does not cover a full window');
-    if (this.numWindows > coverable) throw new RangeError(`fixture covers only ${coverable} windows, ${this.numWindows} requested`);
+    this.numWindows = numWindows;
     this.end = this.start + this.numWindows * this.cfg.windowMs;
     this.now = this.start;
     this.win = this.newWindowStats(0);

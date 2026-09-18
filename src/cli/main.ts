@@ -11,6 +11,7 @@ import { SYNTHETIC_LABEL, fixtureContentHash } from '../market/events.js';
 import { fmtMoney, fmtQty } from '../core/money.js';
 import { loadFixture, saveFixture } from '../market/fixture-io.js';
 import { FIXTURE_CATALOG, generateSyntheticFixture } from '../market/synthetic.js';
+import { validateReplayConfigAgainstFixture } from '../engine/config.js';
 import { replay, type ReplayResult } from '../engine/replay.js';
 import { SCENARIOS, buildRuns, type RunKind } from '../scenarios.js';
 import { dec, milliX, relTime, table } from './format.js';
@@ -63,6 +64,12 @@ async function cmdReplay(flags: Record<string, string | boolean>): Promise<void>
     throw new Error(`fixture ${fixturePath} not found; run "npm run fixtures" first`);
   }
   const fixture = loadFixture(fixturePath);
+
+  // Every run's configuration, including the window count against this fixture, is validated before anything is
+  // written: a rejected configuration must not leave an output directory or an empty ledger behind.
+  const runSpecs = buildRuns(scenario, numWindows);
+  for (const run of runSpecs) validateReplayConfigAgainstFixture(run.config, fixture.header);
+
   mkdirSync(outDir, { recursive: true });
 
   const banner = fixture.header.synthetic
@@ -89,7 +96,7 @@ async function cmdReplay(flags: Record<string, string | boolean>): Promise<void>
   console.log('');
 
   const results: Partial<Record<RunKind, ReplayResult>> = {};
-  for (const run of buildRuns(scenario, numWindows)) {
+  for (const run of runSpecs) {
     const ledgerPath = join(outDir, `${run.kind}.ledger.jsonl`);
     const stream = createWriteStream(ledgerPath, { encoding: 'utf8' });
     const result = await replay({

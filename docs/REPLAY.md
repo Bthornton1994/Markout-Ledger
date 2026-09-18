@@ -33,6 +33,22 @@ Shared configuration (`src/scenarios.ts`): policy tick 300 ms, window 3000 ms, c
 
 Each scenario runs `no_trade`, `unsteered` (steering disabled) and `steered` (deterministic controller) on the same fixture.
 
+## Configuration limits
+
+`validateReplayConfig` (`src/engine/config.ts`) checks a run's configuration on its own; `validateReplayConfigAgainstFixture` adds the window count against the fixture's coverage and is what runs **before the replay starts**: the engine calls it first thing in its constructor, before the ledger exists, before `replay_started` is written and before the first fixture event is read; the CLI calls it for all three runs after reading the fixture and before it creates the output directory or any ledger file. A rejected configuration leaves nothing behind (both are tested: a 0 and an over-coverage `--windows` exit with the error on stderr, print nothing, and create no directory). Every rule throws a `RangeError` that names the field and the offending value.
+
+| field | supported range | why |
+|---|---|---|
+| `policyTickMs` | integer `> 0` | fast-policy cadence |
+| `windowMs` | integer `> 0`, a multiple of `policyTickMs` | every window ends on a tick |
+| `controllerDeadlineMs` | integer, `0 <= d < windowMs` | an instruction must be ready inside the next window |
+| `numWindows` | omitted (every whole window the fixture covers) or integer `>= 1`, at most that coverage (`windowsCovered(header, windowMs)`) | the replay ends on a window boundary the fixture contains |
+| `execution.orderLatencyMs`, `execution.cancelLatencyMs` | integer `>= 0` (zero allowed) | modeled venue latencies |
+| `maxStalenessMs` | integer `>= 0` | observations lagging more than this are rejected; it is also the exchange's reordering window, so it bounds how late a re-attribution can arrive |
+| `outcomeHorizonsMs` | integers `> 0`, each `>= maxStalenessMs`, strictly increasing; may be empty; no upper bound | see below |
+
+Outcome horizons: a re-attribution can move booked quantity to an earlier print up to `maxStalenessMs` after the print that established it, so a horizon shorter than `maxStalenessMs` could be measured before its provenance had settled. Such configurations are refused (a 100 ms horizon under the default 500 ms limit is the tested rejection; a 500 ms horizon under the same limit is the tested accepted boundary, also exercised in a full replay with a print at the maximum lag). Horizons must be strictly increasing because index 0 is the "shortest horizon" used by the deterministic controller and by the `markout` columns, and a repeated horizon would schedule the same measurement twice. There is no upper bound: a horizon that ends after the replay is never measured and is counted in `outcomesPendingAtEnd`.
+
 ## Outputs
 
 ```
