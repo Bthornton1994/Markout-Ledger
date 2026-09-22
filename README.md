@@ -72,7 +72,7 @@ docs/           schema, accounting, execution model, controller contract, replay
 - [docs/CONTROLLER.md](docs/CONTROLLER.md): two-clock timing, instruction contract and bounds, acceptance rules, the LLM interface
 - [docs/REPLAY.md](docs/REPLAY.md): commands, flags, outputs, adding scenarios
 - [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md): limitations of the synthetic data and what real data a credible evaluation needs
-- Milestone 2 (recorded data, contract only, no implementation yet): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`
+- Milestone 2 (recorded data, contract only, no implementation yet; venue Kraken spot `BTC/USD`): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`. No recorded data is committed; captured data stays outside Git until its redistribution rights are established.
 
 ## Guarantees the tests establish
 

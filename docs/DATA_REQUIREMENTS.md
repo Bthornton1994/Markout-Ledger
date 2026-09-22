@@ -16,7 +16,7 @@ They exist to make the engine deterministic and testable. They are **not** a mar
 
 ## Real data required for a credible evaluation
 
-Milestone 2 turns this list into a contract: [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md) selects the feed, [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md) defines capture, normalization and fixture schema v2, and [M2_EVALUATION_PROTOCOL.md](M2_EVALUATION_PROTOCOL.md) separates recorded-market evaluation from fill calibration (item 5 below).
+Milestone 2 turns this list into a contract: [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md) selects the feed (Kraken spot `BTC/USD`, a venue that serves the United States, where this project is operated; Bybit and Binance were rejected because their official pages exclude US users), [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md) defines capture, normalization and fixture schema v2 with the venue's per-message book checksum as the integrity gate, and [M2_EVALUATION_PROTOCOL.md](M2_EVALUATION_PROTOCOL.md) separates recorded-market evaluation from fill calibration (item 5 below). Two limits found on the way are recorded rather than worked around: the selected instrument's quantity increment is finer than the engine's fixed point, so a versioned precision migration precedes any capture ([M2_GROK_HANDOFF.md](M2_GROK_HANDOFF.md) section 0), and the venue's terms have not been read in full by a person, so captured data stays out of this repository and only hashes and provenance are published.
 
 For a specific venue and instrument, all with capture timestamps:
 

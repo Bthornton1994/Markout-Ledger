@@ -1,6 +1,6 @@
 # Milestone 2: recorded-market evaluation is not fill calibration
 
-This document fixes what a replay of recorded market observations can and cannot establish, how fill assumptions are reported, and when a result must be called inconclusive. It applies to every run on a `synthetic: false` fixture produced under [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md).
+This document fixes what a replay of recorded market observations can and cannot establish, how fill assumptions are reported, and when a result must be called inconclusive. It applies to every run on a `synthetic: false` fixture produced under [M2_DATA_CONTRACT.md](M2_DATA_CONTRACT.md) (venue and instrument: Kraken spot `BTC/USD`, [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md)).
 
 ## 1. Two separate questions
 
@@ -21,12 +21,12 @@ Dimensions, all `ReplayConfig` / `ExecutionConfig` fields (REPLAY.md "Configurat
 |---|---|---|
 | `execution.orderLatencyMs` / `execution.cancelLatencyMs` | 0, 50, 150, 500 ms (paired) | activation and cancel instants decide venue-time eligibility; fixed constants stand in for a distribution we have not measured |
 | `maxStalenessMs` | 200, 500, 1000 ms (outcome horizons kept `>=` it) | decides which prints are discarded as stale and how wide the reordering window is |
-| `execution.makerFeeBps` | 0 and the venue's published maker rate for the lowest tier at capture time | the fee tier of an account that does not exist is unknown |
-| `execution.placementCost` / `execution.cancelCost` | 0 and the venue's per-message cost if any (gas on an on-chain venue) | messaging costs dominate a requoting policy |
+| `execution.makerFeeBps` | 0 and the venue's published maker rate for the lowest spot fee tier on the capture day (read by a person from the fee page named in M2_DATA_SOURCE_DECISION.md §2 and recorded with the run) | the fee tier of an account that does not exist is unknown |
+| `execution.placementCost` / `execution.cancelCost` | 0 and the venue's per-message cost if any (none published for this venue's public order entry; gas on an on-chain venue) | messaging costs dominate a requoting policy |
 
 The queue model is not a field: every run reports the constant `pessimistic_back_of_queue` (`fillUncertainty.model`, `replay_started.config.execution.queueModel`). An optimistic bound (`optimistic_front_of_queue`) is a follow-up change to `src/execution/paper.ts`, not part of the smallest M2 PR; until it exists the report states that only the pessimistic bound was run.
 
-Columns per row (all in `RunSummary`, i.e. `results.json` `runs.<kind>`): `portfolio.netPnl`, `portfolio.grossRealized`, `portfolio.feesPaid`, `portfolio.txCostsPaid`, `fills.count`, `fills.qty`, `fills.uncertain`, `fillUncertainty.queueConsumedWithoutFill`, `fills.lateAfterCancel`, `fills.ineligible`, `outcomes[*].avgMarkoutBps` and `count`, `orders.rejectedByRisk`, `risk.killSwitchTripped`, `observations.rejected`, `outcomesPendingAtEnd`; plus the per-run `config` block that the M2 build adds to `results.json`.
+Columns per row (all in `RunSummary`, i.e. `results.json` `runs.<kind>`): `portfolio.netPnl`, `portfolio.grossRealized`, `portfolio.feesPaid`, `portfolio.txCostsPaid`, `fills.count`, `fills.qty`, `fills.uncertain`, `fillUncertainty.queueConsumedWithoutFill`, `fills.lateAfterCancel`, `fills.ineligible`, `outcomes[*].avgMarkoutBps` and `count`, `orders.rejectedByRisk`, `risk.killSwitchTripped`, `observations.rejected`, `outcomesPendingAtEnd`; plus the per-run `config` block and `quotesOutsideVisibleBook` that the M2 build adds to `results.json` (contract §7).
 
 Derived per session and assumption set: `steered - unsteered` and `steered - no_trade` net P&L, and the same differences for the shortest-horizon markout.
 
@@ -34,7 +34,7 @@ Fill uncertainty is part of the result, not a footnote: a row whose `fills.uncer
 
 ## 3. Held-out session protocol
 
-1. **Session unit.** One session = one segment (contract §5.8) of at least 60 minutes whose `endReason` is `capture_end`, `gap_sequence`, `gap_disconnect` or `clock_cut` (a segment cut by `reconstruction_failure` or `malformed_depth` is not admissible), from a capture host with a recorded clock-sync report, normalized to one fixture with one content hash.
+1. **Session unit.** One session = one segment (contract §5.8) of at least 60 minutes whose `endReason` is `capture_end`, `checksum_mismatch`, `snapshot_reset`, `gap_disconnect` or `clock_cut` (everything before such a cut is checksum-verified; a segment cut by `reconstruction_failure` or `malformed_depth` is not admissible), from a capture host with a recorded clock-sync report, normalized to one fixture with one content hash.
 2. **Development set.** Sessions used while writing or tuning policy parameters, controller rules or fill assumptions. Anything inspected before the rule set is frozen is development data, whatever it was intended to be.
 3. **Freeze.** Before any held-out session is *captured*, commit to the repository: the exact policy and controller versions (commit hash), the assumption grid, the metrics, and the decision rule below. The commit hash is the pre-registration timestamp.
 4. **Held-out set.** At least 3 sessions captured after the freeze, on at least 3 distinct calendar days, including at least one session whose realized volatility (from the fixture's own mids) is in the top or bottom quartile of all sessions captured so far. Held-out fixtures are replayed once per grid cell and never used to change anything; if a change is made afterwards, the sessions become development data and new held-out sessions are needed.
@@ -42,7 +42,7 @@ Fill uncertainty is part of the result, not a footnote: a row whose `fills.uncer
 
 ## 4. When the result is inconclusive (explicit criteria)
 
-I6 is evaluated per grid cell and a failing cell is dropped from the grid and reported as dropped; I1 is judged over the remaining cells and needs at least 4 of them. A recorded-market evaluation is **inconclusive**, and must be reported as such, if any of the following holds:
+I6 and I8 are evaluated per grid cell and a failing cell is dropped from the grid and reported as dropped; I1 is judged over the remaining cells and needs at least 4 of them. A recorded-market evaluation is **inconclusive**, and must be reported as such, if any of the following holds:
 
 | code | criterion |
 |---|---|
@@ -51,8 +51,9 @@ I6 is evaluated per grid cell and a failing cell is dropped from the grid and re
 | I3 | `fillUncertainty.queueConsumedWithoutFill` exceeds `fills.count` in the steered or unsteered run (most touches were decided by the queue guess, not by prints). |
 | I4 | Fewer than 30 fills in the steered or unsteered run of a session, or fewer than 3 held-out sessions, or held-out sessions on fewer than 3 distinct days. |
 | I5 | The 90% block-bootstrap interval of the mean paired difference contains zero in a majority of held-out sessions. |
-| I6 | Capture quality (per cell): the trade-stream `lagStatsMs.p99` exceeds the cell's `maxStalenessMs`; `observations.rejected` exceeds 1% of `observations.accepted`; `clockSync` is `unknown`; `venueClockOffsetMs.medianMs` exceeds 25 ms in absolute value. |
+| I6 | Capture quality (per cell): the trade-stream `lagStatsMs.p99` exceeds the cell's `maxStalenessMs`; `observations.rejected` exceeds 1% of `observations.accepted`; `clockSync` is `unknown`; with millisecond probes (`venueClockOffsetMs.resolutionMs == 1`) `medianMs` exceeds 25 ms in absolute value; with second-resolution probes only (`resolutionMs == 1000`, contract §5.6 fallback) the trade-stream `lagStatsMs.p1` is negative or `p50` exceeds 250 ms (a host clock behind the venue shows as vanishing or negative lag, a host ahead as inflated lag, and neither can be separated from the offset at that resolution); `integrity.checksumMismatches` is non-zero inside the session (impossible by construction, kept as an assertion). |
 | I7 | The kill switch tripped in either trading run (the comparison is then between a stopped run and a running one). |
+| I8 | Visible book coverage (per cell): in the steered or unsteered run, `quotesOutsideVisibleBook.count` exceeds 1% of `quotesOutsideVisibleBook.ofLive` (orders rested beyond the deepest level the fixture shows on their side are seeded with a queue of zero, which is the optimistic direction; contract §5.3, EXECUTION_MODEL.md). The fixture's `visibleSpanBps` is printed with every row so the depth can be raised for the next capture rather than the policy narrowed after the fact. |
 
 A conclusive result is stated as: "on N held-out sessions of venue/instrument, under assumption grid G, steering changed net paper P&L by X (interval) relative to the unsteered policy; the pessimistic queue model was the only fill model run; this is not evidence of profitability". Nothing stronger is admissible until fill calibration data exists.
 

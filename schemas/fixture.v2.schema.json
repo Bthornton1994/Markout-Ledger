@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/fixture.v2.schema.json",
   "title": "Markout Ledger replay fixture, schema version 2",
-  "description": "A fixture is JSONL: the first line matches #/$defs/header, every following line matches #/$defs/event. Version 2 adds capture provenance, instrument specification and rights (all under provenance) and per-event raw references. Version 1 (synthetic) fixtures remain valid under the version-1 rules in docs/EVENT_SCHEMA.md and are not described here. See docs/M2_DATA_CONTRACT.md section 6.",
+  "description": "A fixture is JSONL: the first line matches #/$defs/header, every following line matches #/$defs/event. Version 2 adds capture provenance, instrument specification and rights (all under provenance) and per-event raw references. Version 1 (synthetic) fixtures remain valid under the version-1 rules in docs/EVENT_SCHEMA.md and are not described here. Sizes are written with decimalsOf(header.qtyScale) places: six on the current engine, eight after the precision migration of docs/M2_GROK_HANDOFF.md section 0. See docs/M2_DATA_CONTRACT.md section 6.",
   "oneOf": [{ "$ref": "#/$defs/header" }, { "$ref": "#/$defs/event" }],
   "$defs": {
-    "decimal": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{6}$", "description": "non-negative decimal with exactly six places, as written by fmtPrice/fmtQty" },
-    "verbatimDecimal": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]{1,8})?$", "description": "the venue's own decimal string, kept verbatim in instrumentSpec" },
+    "priceDecimal": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{6}$", "description": "non-negative decimal with exactly six places, as written by fmtPrice" },
+    "sizeDecimal": { "type": "string", "pattern": "^[0-9]+\\.([0-9]{6}|[0-9]{8})$", "description": "non-negative decimal with six places (qtyScale 1000000) or eight places (qtyScale 100000000), as written by fmtQty" },
+    "plainDecimal": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]{1,10})?$", "description": "the venue's value as a plain decimal string (exponent lexemes converted exactly), kept in instrumentSpec" },
     "ms": { "type": "integer", "minimum": 0 },
     "ns": { "type": "string", "pattern": "^[0-9]{1,20}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -25,40 +26,62 @@
       }
     },
     "lagStats": { "type": "object", "required": ["count", "min", "p1", "p50", "p99", "max"], "properties": { "count": { "type": "integer", "minimum": 0 }, "min": { "type": "integer" }, "p1": { "type": "integer" }, "p50": { "type": "integer" }, "p99": { "type": "integer" }, "max": { "type": "integer" } } },
+    "spanStats": { "type": "object", "required": ["p1", "p50"], "properties": { "p1": { "type": "number", "minimum": 0 }, "p50": { "type": "number", "minimum": 0 } }, "description": "distance in basis points from mid to the worst emitted level on one side, percentiles over book events" },
     "rawRef": { "type": "object", "required": ["fileIndex", "record", "element"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "record": { "type": "integer", "minimum": 0 }, "element": { "type": "integer", "minimum": 0 } } },
     "instrumentSpec": {
       "type": "object",
-      "required": ["tickSize", "lotSize", "priceDecimals", "qtyDecimals", "aggressorSource", "tradeStreamGranularity", "tradeIdOrdered", "source", "fetchedAtIso"],
+      "required": ["venueSymbol", "tickSize", "lotSize", "priceDecimals", "qtyDecimals", "aggressorSource", "tradeStreamGranularity", "tradeIdOrdered", "integrity", "source", "fetchedAtIso"],
       "properties": {
-        "tickSize": { "$ref": "#/$defs/verbatimDecimal" },
-        "lotSize": { "$ref": "#/$defs/verbatimDecimal" },
-        "priceDecimals": { "type": "integer", "minimum": 0, "maximum": 6 },
-        "qtyDecimals": { "type": "integer", "minimum": 0, "maximum": 6 },
+        "venueSymbol": { "type": "string" },
+        "tickSize": { "$ref": "#/$defs/plainDecimal", "description": "the venue's price increment" },
+        "lotSize": { "$ref": "#/$defs/plainDecimal", "description": "the venue's quantity increment" },
+        "priceDecimals": { "type": "integer", "minimum": 0, "maximum": 6, "description": "must not exceed decimalsOf(PRICE_SCALE)" },
+        "qtyDecimals": { "type": "integer", "minimum": 0, "maximum": 8, "description": "must not exceed decimalsOf(QTY_SCALE) of the normalizing engine (6 today, 8 after the precision migration)" },
+        "costDecimals": { "type": "integer", "minimum": 0 },
+        "qtyMin": { "$ref": "#/$defs/plainDecimal" },
+        "costMin": { "$ref": "#/$defs/plainDecimal" },
+        "status": { "type": "string" },
         "aggressorSource": { "enum": ["maker_flag", "taker_side", "none"] },
         "tradeStreamGranularity": { "enum": ["per_fill", "aggregated"] },
         "tradeIdOrdered": { "type": "boolean" },
+        "integrity": { "enum": ["crc32_top10", "sequence", "none"], "description": "the per-message stream-position proof the adapter verifies" },
         "source": { "type": "string" },
         "fetchedAtIso": { "type": "string", "format": "date-time" }
       }
     },
     "capture": {
       "type": "object",
-      "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "dropped", "cuts"],
+      "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "integrity", "dropped", "cuts"],
       "properties": {
         "captureId": { "type": "string", "format": "uuid" },
         "captureFormatVersion": { "const": 1 },
         "rawFiles": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
         "segmentIndex": { "type": "integer", "minimum": 0 },
         "startReason": { "enum": ["capture_start", "resync_after_gap", "resync_after_clock_cut"] },
-        "endReason": { "enum": ["capture_end", "gap_sequence", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth"] },
+        "endReason": { "enum": ["capture_end", "checksum_mismatch", "snapshot_reset", "gap_sequence", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth"] },
         "endRawRecord": { "type": "object", "required": ["fileIndex", "record"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "record": { "type": "integer", "minimum": 0 } } },
         "capturer": { "$ref": "#/$defs/softwareWithCommit" },
         "normalizer": { "$ref": "#/$defs/softwareWithCommit" },
         "adapter": { "$ref": "#/$defs/software" },
         "clockSync": { "enum": ["synchronized", "unknown"] },
         "clockReports": { "type": "object", "required": ["start", "end"], "properties": { "start": { "$ref": "#/$defs/clock" }, "end": { "$ref": "#/$defs/clock" } } },
-        "venueClockOffsetMs": { "type": "object", "required": ["samples", "medianMs", "medianRttMs", "maxAbsMs"], "properties": { "samples": { "type": "integer", "minimum": 0 }, "medianMs": { "type": "number" }, "medianRttMs": { "type": "number" }, "maxAbsMs": { "type": "number" } } },
+        "venueClockOffsetMs": {
+          "type": "object",
+          "required": ["samples", "medianMs", "medianRttMs", "maxAbsMs", "resolutionMs", "source"],
+          "properties": {
+            "samples": { "type": "integer", "minimum": 0 },
+            "medianMs": { "type": "number" },
+            "medianRttMs": { "type": "number" },
+            "maxAbsMs": { "type": "number" },
+            "resolutionMs": { "enum": [1, 1000], "description": "1 for WebSocket method-response probes, 1000 for the REST Time fallback" },
+            "source": { "enum": ["ws_method_response", "rest_time", "none"] }
+          }
+        },
         "lagStatsMs": { "type": "object", "required": ["book", "trade"], "properties": { "book": { "$ref": "#/$defs/lagStats" }, "trade": { "$ref": "#/$defs/lagStats" } } },
+        "integrity": { "type": "object", "required": ["checksumsVerified", "checksumMismatches"], "properties": { "checksumsVerified": { "type": "integer", "minimum": 0 }, "checksumMismatches": { "type": "integer", "minimum": 0 } } },
+        "visibleSpanBps": { "type": "object", "required": ["bid", "ask"], "properties": { "bid": { "$ref": "#/$defs/spanStats" }, "ask": { "$ref": "#/$defs/spanStats" } } },
+        "tradeIdJumps": { "type": "integer", "minimum": 0 },
+        "venueStatus": { "type": "array", "items": { "type": "object", "required": ["record", "system"], "properties": { "record": { "$ref": "#/$defs/rawRef" }, "system": { "type": "string" } } } },
         "dropped": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
         "cuts": { "type": "array", "items": { "type": "object", "required": ["reason", "fileIndex", "record"], "properties": { "reason": { "type": "string" }, "fileIndex": { "type": "integer" }, "record": { "type": "integer" }, "detail": { "type": "string" } } } },
         "vendor": { "type": "object", "required": ["name", "captureLocation", "licence"], "properties": { "name": { "type": "string" }, "captureLocation": { "type": "string" }, "licence": { "type": "string" } }, "description": "required when provenance.timeBasis.obsTime is third_party_receive (a basis this build rejects)" }
@@ -74,7 +97,13 @@
         "redistribution": { "enum": ["permitted", "prohibited", "unclear"] },
         "publication": { "enum": ["hash_only", "sample_permitted"] },
         "note": { "type": "string" }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "publication": { "const": "sample_permitted" } }, "required": ["publication"] },
+          "then": { "properties": { "redistribution": { "const": "permitted" } } }
+        }
+      ]
     },
     "provenance": {
       "type": "object",
@@ -107,9 +136,9 @@
         "venue": { "type": "string" },
         "venueSymbol": { "type": "string" },
         "priceScale": { "const": 1000000 },
-        "qtyScale": { "const": 1000000 },
-        "tickSize": { "$ref": "#/$defs/decimal" },
-        "lotSize": { "$ref": "#/$defs/decimal" },
+        "qtyScale": { "enum": [1000000, 100000000] },
+        "tickSize": { "$ref": "#/$defs/priceDecimal" },
+        "lotSize": { "$ref": "#/$defs/sizeDecimal" },
         "startTime": { "$ref": "#/$defs/ms" },
         "endTime": { "$ref": "#/$defs/ms" },
         "eventCount": { "type": "integer", "minimum": 0 },
@@ -173,7 +202,7 @@
         "recvMonoNs": { "$ref": "#/$defs/ns" }
       }
     },
-    "level": { "type": "object", "required": ["price", "size"], "properties": { "price": { "$ref": "#/$defs/decimal" }, "size": { "$ref": "#/$defs/decimal" } } },
+    "level": { "type": "object", "required": ["price", "size"], "properties": { "price": { "$ref": "#/$defs/priceDecimal" }, "size": { "$ref": "#/$defs/sizeDecimal" } } },
     "event": {
       "oneOf": [
         {
@@ -185,7 +214,7 @@
         {
           "allOf": [
             { "$ref": "#/$defs/eventBase" },
-            { "type": "object", "properties": { "type": { "const": "trade" }, "tradeId": { "type": "string" }, "price": { "$ref": "#/$defs/decimal" }, "size": { "$ref": "#/$defs/decimal" }, "aggressor": { "enum": ["buy", "sell", "unknown"] } }, "required": ["type", "tradeId", "price", "size", "aggressor"] }
+            { "type": "object", "properties": { "type": { "const": "trade" }, "tradeId": { "type": "string" }, "price": { "$ref": "#/$defs/priceDecimal" }, "size": { "$ref": "#/$defs/sizeDecimal" }, "aggressor": { "enum": ["buy", "sell", "unknown"] } }, "required": ["type", "tradeId", "price", "size", "aggressor"] }
           ]
         }
       ]

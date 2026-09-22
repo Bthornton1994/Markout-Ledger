@@ -38,7 +38,7 @@ Rules enforced by `validateHeader`:
 
 - `synthetic: true` requires `syntheticLabel` to equal `SYNTHETIC_LABEL` verbatim and `provenance.source === "synthetic"`. A synthetic file with the label removed or altered is refused.
 - `synthetic: false` requires `provenance.source === "recorded"`; recorded data should fill `recordedFrom` and `captureMethod`.
-- Scales must match the engine (1e-6 for price, quantity and money).
+- Scales must match the engine (1e-6 for price, quantity and money today). Recorded data from the Milestone 2 venue needs a quantity scale of 1e-8, which is a versioned engine change with its own acceptance tests ([M2_GROK_HANDOFF.md](M2_GROK_HANDOFF.md) section 0); after it, version-1 fixtures still declare `qtyScale: 1000000` and are rescaled exactly on load.
 - `startTime` is the replay clock origin. Windows and policy ticks are aligned to it. `endTime` bounds the replay.
 - `eventCount` must match the number of event lines.
 
