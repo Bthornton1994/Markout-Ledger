@@ -22,7 +22,7 @@ Dimensions, all `ReplayConfig` / `ExecutionConfig` fields (REPLAY.md "Configurat
 | `execution.orderLatencyMs` / `execution.cancelLatencyMs` | 0, 50, 150, 500 ms (paired) | activation and cancel instants decide venue-time eligibility; fixed constants stand in for a distribution we have not measured |
 | `maxStalenessMs` | 200, 500, 1000 ms (outcome horizons kept `>=` it) | decides which prints are discarded as stale and how wide the reordering window is |
 | `execution.makerFeeBps` | 0 and the venue's published maker rate for the lowest spot fee tier on the capture day (read by a person from the fee page named in M2_DATA_SOURCE_DECISION.md §2 and recorded with the run) | the fee tier of an account that does not exist is unknown |
-| `execution.placementCost` / `execution.cancelCost` | 0 and the venue's per-message cost if any (none published for this venue's public order entry; gas on an on-chain venue) | messaging costs dominate a requoting policy |
+| `execution.placementCost` / `execution.cancelCost` | 0 and the venue's per-message cost if any (no per-message order-entry cost was found for this venue, which is not verified [U]: the owner checks the fee page, M2_DATA_SOURCE_DECISION.md §4; gas on an on-chain venue) | messaging costs dominate a requoting policy |
 
 The queue model is not a field: every run reports the constant `pessimistic_back_of_queue` (`fillUncertainty.model` carries the token; `replay_started.config.execution.queueModel` carries the full sentence that begins with it). An optimistic bound (`optimistic_front_of_queue`) is a follow-up change to `src/execution/paper.ts`, not part of the smallest M2 PR; until it exists the report states that only the pessimistic bound was run.
 

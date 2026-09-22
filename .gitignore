@@ -3,3 +3,7 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Milestone 2: recorded market data never enters Git (docs/M2_DATA_CONTRACT.md section 6.3)
+captures/
+normalized/

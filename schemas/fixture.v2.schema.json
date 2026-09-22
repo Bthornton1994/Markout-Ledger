@@ -18,7 +18,7 @@
       "required": ["source", "synchronized", "takenAtIso"],
       "properties": {
         "source": { "enum": ["chrony", "ntpd", "ptp", "platform", "unknown"] },
-        "report": { "type": "string" },
+        "report": false,
         "offsetMs": { "type": "number" },
         "stratum": { "type": "integer" },
         "synchronized": { "type": "boolean" },
