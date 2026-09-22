@@ -30,7 +30,7 @@
     "rawRef": { "type": "object", "required": ["fileIndex", "record", "element"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "record": { "type": "integer", "minimum": 0 }, "element": { "type": "integer", "minimum": 0 } } },
     "instrumentSpec": {
       "type": "object",
-      "required": ["venueSymbol", "tickSize", "lotSize", "priceDecimals", "qtyDecimals", "aggressorSource", "tradeStreamGranularity", "tradeIdOrdered", "integrity", "source", "fetchedAtIso"],
+      "required": ["venueSymbol", "tickSize", "lotSize", "priceDecimals", "qtyDecimals", "costDecimals", "qtyMin", "costMin", "status", "aggressorSource", "tradeStreamGranularity", "tradeIdOrdered", "integrity", "source", "fetchedAtIso"],
       "properties": {
         "venueSymbol": { "type": "string" },
         "tickSize": { "$ref": "#/$defs/plainDecimal", "description": "the venue's price increment" },
@@ -51,7 +51,7 @@
     },
     "capture": {
       "type": "object",
-      "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "integrity", "dropped", "cuts"],
+      "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "integrity", "visibleSpanBps", "tradeIdJumps", "venueStatus", "dropped", "cuts"],
       "properties": {
         "captureId": { "type": "string", "format": "uuid" },
         "captureFormatVersion": { "const": 1 },
@@ -78,10 +78,10 @@
           }
         },
         "lagStatsMs": { "type": "object", "required": ["book", "trade"], "properties": { "book": { "$ref": "#/$defs/lagStats" }, "trade": { "$ref": "#/$defs/lagStats" } } },
-        "integrity": { "type": "object", "required": ["checksumsVerified", "checksumMismatches"], "properties": { "checksumsVerified": { "type": "integer", "minimum": 0 }, "checksumMismatches": { "type": "integer", "minimum": 0 } } },
+        "integrity": { "type": "object", "required": ["checksumsVerified", "checksumMismatches"], "properties": { "checksumsVerified": { "type": "integer", "minimum": 0 }, "checksumMismatches": { "type": "integer", "minimum": 0, "maximum": 1, "description": "1 only for a segment ended by checksum_mismatch" } } },
         "visibleSpanBps": { "type": "object", "required": ["bid", "ask"], "properties": { "bid": { "$ref": "#/$defs/spanStats" }, "ask": { "$ref": "#/$defs/spanStats" } } },
         "tradeIdJumps": { "type": "integer", "minimum": 0 },
-        "venueStatus": { "type": "array", "items": { "type": "object", "required": ["record", "system"], "properties": { "record": { "$ref": "#/$defs/rawRef" }, "system": { "type": "string" } } } },
+        "venueStatus": { "type": "array", "items": { "type": "object", "required": ["record", "source", "value"], "properties": { "record": { "$ref": "#/$defs/rawRef" }, "source": { "enum": ["status", "instrument"] }, "value": { "type": "string" } } }, "description": "status frames whose system is not online, and instrument updates that change this pair's status" },
         "dropped": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
         "cuts": { "type": "array", "items": { "type": "object", "required": ["reason", "fileIndex", "record"], "properties": { "reason": { "type": "string" }, "fileIndex": { "type": "integer" }, "record": { "type": "integer" }, "detail": { "type": "string" } } } },
         "vendor": { "type": "object", "required": ["name", "captureLocation", "licence"], "properties": { "name": { "type": "string" }, "captureLocation": { "type": "string" }, "licence": { "type": "string" } }, "description": "required when provenance.timeBasis.obsTime is third_party_receive (a basis this build rejects)" }

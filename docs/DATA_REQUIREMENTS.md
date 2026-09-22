@@ -20,7 +20,7 @@ Milestone 2 turns this list into a contract: [M2_DATA_SOURCE_DECISION.md](M2_DAT
 
 For a specific venue and instrument, all with capture timestamps:
 
-1. **Full-depth order-book updates with sequence numbers** (L2 deltas at minimum; L3 / per-order feeds where the venue offers them). Snapshots every 100 ms lose the intra-interval touches and cancels that decide fills. Sequence numbers are needed to detect gaps and duplicates instead of guessing.
+1. **Full-depth order-book updates with a per-message integrity mechanism** (sequence numbers or a checksum; L2 deltas at minimum; L3 / per-order feeds where the venue offers them). Snapshots every 100 ms lose the intra-interval touches and cancels that decide fills. Sequence numbers or checksums are needed to detect gaps and corruption instead of guessing (the selected Milestone 2 feed has a per-message checksum and no sequence number).
 2. **All trades with aggressor side**, trade ids, and the venue timestamp, so prints can be matched to book state and to our own resting price.
 3. **Receive-time stamps** (`obsTime`) taken by the capturing process on the same clock the strategy would use, separate from venue/block time. Without them the causality guarantees in this engine are meaningless in evaluation.
 4. **For on-chain venues:** block number and block time per event, mempool or sequencer inclusion latency, and the actual gas or fee paid per placement and cancel, so `placementCost` / `cancelCost` can be set from data rather than assumed.

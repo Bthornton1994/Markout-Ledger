@@ -47,11 +47,11 @@
     },
     {
       "if": { "properties": { "type": { "const": "message" } }, "required": ["type"] },
-      "then": { "type": "object", "required": ["payload"], "properties": { "stream": { "type": "string", "description": "the frame's channel, or method:<name> for method responses, or unknown" }, "payload": { "type": "string" }, "encoding": { "enum": ["utf8", "base64"] } } }
+      "then": { "type": "object", "required": ["stream", "payload"], "properties": { "stream": { "type": "string", "description": "the frame's channel, or method:<name> for method responses, or unknown" }, "payload": { "type": "string" }, "encoding": { "enum": ["utf8", "base64"] } } }
     },
     {
       "if": { "properties": { "type": { "const": "probe" } }, "required": ["type"] },
-      "then": { "type": "object", "required": ["url", "sentWallMs", "sentMonoNs", "payload"], "properties": { "url": { "type": "string" }, "sentWallMs": { "type": "integer", "minimum": 0 }, "sentMonoNs": { "$ref": "#/$defs/ns" }, "payload": { "type": "string" } }, "description": "REST venue-clock probe (fallback only); the record's own clocks are the response receive time" }
+      "then": { "type": "object", "required": ["url", "sentWallMs", "sentMonoNs", "payload"], "properties": { "url": { "type": "string" }, "sentWallMs": { "type": "integer", "minimum": 0 }, "sentMonoNs": { "$ref": "#/$defs/ns" }, "payload": { "type": "string" } }, "description": "REST venue-clock probe (coarse, every 10 minutes); the record's own clocks are the response receive time" }
     },
     {
       "if": { "properties": { "type": { "const": "file_end" } }, "required": ["type"] },
@@ -66,7 +66,8 @@
           "endedAtIso": { "type": "string", "format": "date-time" },
           "clock": { "$ref": "#/$defs/clock" },
           "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
-          "files": { "type": "array", "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } }
+          "files": { "type": "array", "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
+          "processingMs": { "type": "object", "required": ["p50", "p99", "max"], "properties": { "p50": { "type": "number", "minimum": 0 }, "p99": { "type": "number", "minimum": 0 }, "max": { "type": "number", "minimum": 0 } }, "description": "frame-handler durations, contract section 2" }
         }
       }
     }
