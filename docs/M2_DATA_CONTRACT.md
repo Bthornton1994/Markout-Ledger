@@ -299,7 +299,7 @@ Synchronization (contract §5.3 instantiated):
 5. A `snapshot` while a segment is open is `snapshot_reset` (the segment ends at the previous record; the snapshot opens the next one).
 6. The fixture emits the top `depth` (default 100) levels per side; `visibleSpanBps` is computed over emitted events.
 7. A `snapshot` never followed by a verified `update` before the next `snapshot`, `ws_close` or end of capture is `reconstruction_failure`: the segment is refused.
-8. No sequence rule exists for this channel and none is applied; the checksum on every message is the only stream-position proof, and it is checked on every message (the venue documents verification as optional; this repository does not treat it as optional).
+8. No sequence rule exists for this channel and none is applied; the checksum on every message is the only stream-position proof, and it is checked on every message (a documentation excerpt describes verification as optional; this repository does not treat it as optional).
 
 ### 8.3 Trade messages
 
@@ -307,7 +307,7 @@ Synchronization (contract §5.3 instantiated):
 {"channel":"trade","type":"update","data":[{"symbol":"BTC/USD","side":"buy","price":62710.5,"qty":0.00120000,"ord_type":"market","trade_id":81234567,"timestamp":"2026-07-09T17:20:01.130001Z"}]}
 ```
 
-(Field names and types from the venue's official `kraken-cli` type `TradeData`; values illustrative.) One `trade` event per array element, in array order. `marketTime = timestamp` floored to ms (`venueTimeText` keeps the string); `tradeId = trade_id` as a decimal string (`tradeIdOrdered: true`, §5.7); `aggressor = "buy"` when `side == "buy"`, `"sell"` when `side == "sell"` (the venue documents `side` as the side of the taker order), anything else `malformed`; `price`, `size` are the lexemes of `price`, `qty`; `venueSeq = "id:<trade_id>;ts:<timestamp>"`; `ordType` is kept in the normalize report's counts (`limit` / `market` taker orders) and not in the fixture. A frame with `type == "snapshot"` is history (§5.4) and is not emitted. Several trades in one frame are several events with distinct `elementIndex` (§5.2); the venue documents that batching does not imply one taker order, so nothing is merged. Duplicates and regressions are keyed on `trade_id` per segment (§5.7).
+(Field names and types from the venue's official `kraken-cli` type `TradeData`; values illustrative.) One `trade` event per array element, in array order. `marketTime = timestamp` floored to ms (`venueTimeText` keeps the string); `tradeId = trade_id` as a decimal string (`tradeIdOrdered: true`, §5.7); `aggressor = "buy"` when `side == "buy"`, `"sell"` when `side == "sell"` (the venue's official Rust SDK documents `side` as "Aggressor (taker) side of the print", `kraken-api-sdk` `rust/src/api/market/ws_types.rs:81-84,108-119`; the documentation page says "the side of the taker order"), anything else `malformed`; `price`, `size` are the lexemes of `price`, `qty`; `venueSeq = "id:<trade_id>;ts:<timestamp>"`; `ordType` is kept in the normalize report's counts (`limit` / `market` taker orders) and not in the fixture. A frame with `type == "snapshot"` is history (§5.4) and is not emitted. Several trades in one frame are several events with distinct `elementIndex` (§5.2); the venue documents that batching does not imply one taker order, so nothing is merged. Duplicates and regressions are keyed on `trade_id` per segment (§5.7).
 
 ### 8.4 Instrument and status frames
 
