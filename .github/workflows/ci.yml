@@ -16,6 +16,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Validate JSON Schemas (draft 2020-12, strict, with formats)
+        run: npm run test:schemas
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo

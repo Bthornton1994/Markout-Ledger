@@ -96,12 +96,16 @@
         "checkedBy": { "type": "string" },
         "redistribution": { "enum": ["permitted", "prohibited", "unclear"] },
         "publication": { "enum": ["hash_only", "sample_permitted"] },
-        "note": { "type": "string" }
+        "note": { "type": "string", "description": "required when redistribution is permitted: names the written record that meets decision condition C2 and grants redistribution (source, date, and where it is recorded); docs/M2_DATA_CONTRACT.md section 6.3" }
       },
       "allOf": [
         {
           "if": { "properties": { "publication": { "const": "sample_permitted" } }, "required": ["publication"] },
           "then": { "properties": { "redistribution": { "const": "permitted" } } }
+        },
+        {
+          "if": { "properties": { "redistribution": { "const": "permitted" } }, "required": ["redistribution"] },
+          "then": { "required": ["note"], "properties": { "note": { "type": "string", "minLength": 1 } } }
         }
       ]
     },

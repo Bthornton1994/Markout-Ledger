@@ -1,0 +1,222 @@
+{
+  "description": "Valid fixture schema v2 lines (docs/M2_DATA_CONTRACT.md section 6): headers and events, constructed for illustration; nothing here is venue data (some book values reuse the official kraken-cli test fixture, as noted in capture-record.v1.examples.json). header_recorded_qty8 is a recorded header after the precision migration (qtyScale 1e8, docs/M2_GROK_HANDOFF.md section 0) for a hypothetical capture made after decision conditions C2 and C3 are met. header_recorded_qty6 is the shape at the current engine scale for a substituted pair (decision condition C1), from a separate hypothetical capture; its symbol PAIR/USD is a placeholder, not a venue instrument. Both carry the hash-only rights block, the only one admissible until the written record that meets C2 grants redistribution. event_book (seq 1) and event_trade (seq 2) are the first two events of header_recorded_qty8's segment; event_book is the book after the update example in capture-record.v1.examples.json (checksum 1396696505). tests/schemas.test.ts validates each example against schemas/fixture.v2.schema.json (the root and the matching definition) and derives the deliberate failure cases from them.",
+  "examples": {
+    "header_recorded_qty8": {
+      "type": "header",
+      "schemaVersion": 2,
+      "symbol": "BTC/USD",
+      "venue": "kraken-spot",
+      "venueSymbol": "BTC/USD",
+      "priceScale": 1000000,
+      "qtyScale": 100000000,
+      "tickSize": "0.100000",
+      "lotSize": "0.00000001",
+      "startTime": 1791288001123,
+      "endTime": 1791293399456,
+      "eventCount": 187000,
+      "synthetic": false,
+      "depth": 25,
+      "provenance": {
+        "source": "recorded",
+        "description": "constructed example: one verified segment of a first-party capture of the public WebSocket API v2",
+        "recordedFrom": "wss://ws.kraken.com/v2",
+        "captureMethod": "markout-ledger/capture 0.1.0",
+        "timeBasis": { "obsTime": "capture_receive", "marketTime": "book: update timestamp; trade: timestamp (RFC 3339 microseconds floored to ms)" },
+        "instrumentSpec": {
+          "venueSymbol": "BTC/USD",
+          "tickSize": "0.1",
+          "lotSize": "0.00000001",
+          "priceDecimals": 1,
+          "qtyDecimals": 8,
+          "costDecimals": 5,
+          "qtyMin": "0.0001",
+          "costMin": "0.5",
+          "status": "online",
+          "aggressorSource": "taker_side",
+          "tradeStreamGranularity": "per_fill",
+          "tradeIdOrdered": true,
+          "integrity": "crc32_top10",
+          "source": "instrument snapshot at raw 0:10:0, cross-checked against manifest_start.instrumentSpec",
+          "fetchedAtIso": "2026-10-06T12:00:00.160Z"
+        },
+        "capture": {
+          "captureId": "123e4567-e89b-42d3-a456-426614174000",
+          "captureFormatVersion": 1,
+          "rawFiles": [
+            { "fileIndex": 0, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "records": 120000 },
+            { "fileIndex": 1, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "records": 67196 }
+          ],
+          "segmentIndex": 0,
+          "startReason": "capture_start",
+          "endReason": "capture_end",
+          "endRawRecord": { "fileIndex": 1, "record": 67190 },
+          "capturer": { "name": "markout-ledger/capture", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "normalizer": { "name": "markout-ledger/normalize", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "adapter": { "name": "kraken-spot-ws2", "version": "1" },
+          "clockSync": "synchronized",
+          "clockReports": {
+            "start": { "source": "chrony", "offsetMs": -0.31, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T11:59:59.800Z" },
+            "end": { "source": "chrony", "offsetMs": -0.27, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T13:29:59.900Z" }
+          },
+          "venueClockOffsetMs": { "samples": 181, "medianMs": 1.2, "medianRttMs": 31, "maxAbsMs": 4.1, "resolutionMs": 1, "source": "ws_method_response" },
+          "lagStatsMs": {
+            "book": { "count": 180000, "min": 3, "p1": 5, "p50": 20, "p99": 90, "max": 400 },
+            "trade": { "count": 7000, "min": 1, "p1": 2, "p50": 12, "p99": 80, "max": 350 }
+          },
+          "integrity": { "checksumsVerified": 180001, "checksumMismatches": 0 },
+          "visibleSpanBps": { "bid": { "p1": 3.1, "p50": 9.4 }, "ask": { "p1": 3.0, "p50": 9.1 } },
+          "tradeIdJumps": 0,
+          "venueStatus": [],
+          "dropped": { "depthBeforeSnapshot": 0, "tradeSnapshotHistory": 0, "exponentLexemeInBook": 0 },
+          "cuts": []
+        },
+        "rights": {
+          "termsUrl": "https://www.kraken.com/legal/global-terms",
+          "termsCheckedOn": "2026-10-01",
+          "checkedBy": "owner",
+          "redistribution": "unclear",
+          "publication": "hash_only",
+          "note": "constructed example: C2 met by <written record, date, pull request #3 comment>; redistribution not granted in writing, so hash only"
+        }
+      }
+    },
+    "header_recorded_qty6": {
+      "type": "header",
+      "schemaVersion": 2,
+      "symbol": "PAIR/USD",
+      "venue": "kraken-spot",
+      "venueSymbol": "PAIR/USD",
+      "priceScale": 1000000,
+      "qtyScale": 1000000,
+      "tickSize": "0.010000",
+      "lotSize": "0.000001",
+      "startTime": 1791289200250,
+      "endTime": 1791291510750,
+      "eventCount": 48000,
+      "synthetic": false,
+      "depth": 25,
+      "provenance": {
+        "source": "recorded",
+        "description": "constructed example: the second segment of a separate one-hour capture of a substituted pair at the current engine scale; PAIR/USD is a placeholder, not a venue instrument",
+        "recordedFrom": "wss://ws.kraken.com/v2",
+        "captureMethod": "markout-ledger/capture 0.1.0",
+        "timeBasis": { "obsTime": "capture_receive", "marketTime": "book: update timestamp; trade: timestamp (RFC 3339 microseconds floored to ms)" },
+        "instrumentSpec": {
+          "venueSymbol": "PAIR/USD",
+          "tickSize": "0.01",
+          "lotSize": "0.000001",
+          "priceDecimals": 2,
+          "qtyDecimals": 6,
+          "costDecimals": 5,
+          "qtyMin": "0.001",
+          "costMin": "0.5",
+          "status": "online",
+          "aggressorSource": "taker_side",
+          "tradeStreamGranularity": "per_fill",
+          "tradeIdOrdered": true,
+          "integrity": "crc32_top10",
+          "source": "instrument snapshot at raw 0:10:0, cross-checked against manifest_start.instrumentSpec",
+          "fetchedAtIso": "2026-10-06T12:00:00.160Z"
+        },
+        "capture": {
+          "captureId": "8f14e45f-ceea-467a-a866-051f2b3e3a1c",
+          "captureFormatVersion": 1,
+          "rawFiles": [{ "fileIndex": 0, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "records": 60000 }],
+          "segmentIndex": 1,
+          "startReason": "resync_after_gap",
+          "endReason": "checksum_mismatch",
+          "endRawRecord": { "fileIndex": 0, "record": 59990 },
+          "capturer": { "name": "markout-ledger/capture", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "normalizer": { "name": "markout-ledger/normalize", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "adapter": { "name": "kraken-spot-ws2", "version": "1" },
+          "clockSync": "synchronized",
+          "clockReports": {
+            "start": { "source": "chrony", "offsetMs": -0.31, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T11:59:59.800Z" },
+            "end": { "source": "chrony", "offsetMs": -0.27, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T12:59:59.900Z" }
+          },
+          "venueClockOffsetMs": { "samples": 6, "medianMs": 400, "medianRttMs": 60, "maxAbsMs": 700, "resolutionMs": 1000, "source": "rest_time" },
+          "lagStatsMs": {
+            "book": { "count": 46000, "min": 4, "p1": 6, "p50": 22, "p99": 95, "max": 410 },
+            "trade": { "count": 2000, "min": 2, "p1": 3, "p50": 14, "p99": 85, "max": 360 }
+          },
+          "integrity": { "checksumsVerified": 46001, "checksumMismatches": 1 },
+          "visibleSpanBps": { "bid": { "p1": 4.2, "p50": 11.8 }, "ask": { "p1": 4.0, "p50": 11.5 } },
+          "tradeIdJumps": 0,
+          "venueStatus": [{ "record": { "fileIndex": 0, "record": 40000, "element": 0 }, "source": "status", "value": "post_only" }],
+          "dropped": { "depthWhileUnsynced": 12 },
+          "cuts": [{ "reason": "checksum_mismatch", "fileIndex": 0, "record": 59991, "detail": "checksum mismatch; resubscribed" }]
+        },
+        "rights": {
+          "termsUrl": "https://www.kraken.com/legal/global-terms",
+          "termsCheckedOn": "2026-10-01",
+          "checkedBy": "owner",
+          "redistribution": "unclear",
+          "publication": "hash_only",
+          "note": "constructed example: C2 met by <written record, date, pull request #3 comment>; redistribution not granted in writing, so hash only"
+        }
+      }
+    },
+    "header_synthetic": {
+      "type": "header",
+      "schemaVersion": 2,
+      "symbol": "SYN-USD",
+      "venue": "synthetic-clob",
+      "venueSymbol": "SYN-USD",
+      "priceScale": 1000000,
+      "qtyScale": 1000000,
+      "tickSize": "0.010000",
+      "lotSize": "0.001000",
+      "startTime": 946684800000,
+      "endTime": 946684839000,
+      "eventCount": 550,
+      "synthetic": true,
+      "depth": 5,
+      "syntheticLabel": "SYNTHETIC DATA: generated by a seeded simulator. Not real market data. Results derived from it are research output only and imply nothing about live profitability.",
+      "provenance": {
+        "source": "synthetic",
+        "description": "seeded two-sided order-flow simulator",
+        "generator": "markout-ledger/synthetic",
+        "generatorVersion": "1.0.0",
+        "seed": 42,
+        "timeBasis": { "obsTime": "marketTime plus modeled feed latency", "marketTime": "simulated venue time" }
+      }
+    },
+    "event_book": {
+      "type": "book",
+      "eventId": "123e4567-e89b-42d3-a456-426614174000:0:12:0",
+      "seq": 1,
+      "obsTime": 1791288001123,
+      "marketTime": 1791288001101,
+      "symbol": "BTC/USD",
+      "venue": "kraken-spot",
+      "venueSeq": "ts:2026-10-06T12:00:01.101234Z;crc:1396696505",
+      "rawRef": { "fileIndex": 0, "record": 12, "element": 0 },
+      "recvMonoNs": "5001123000000",
+      "bids": [
+        { "price": "62710.400000", "size": "0.01000000" },
+        { "price": "62709.100000", "size": "2.00000000" }
+      ],
+      "asks": [
+        { "price": "62710.500000", "size": "0.93111634" },
+        { "price": "62710.600000", "size": "0.50000000" },
+        { "price": "62711.000000", "size": "1.20000000" }
+      ]
+    },
+    "event_trade": {
+      "type": "trade",
+      "eventId": "123e4567-e89b-42d3-a456-426614174000:0:13:0",
+      "seq": 2,
+      "obsTime": 1791288001130,
+      "marketTime": 1791288001129,
+      "symbol": "BTC/USD",
+      "venue": "kraken-spot",
+      "venueSeq": "id:81234567;ts:2026-10-06T12:00:01.129001Z",
+      "rawRef": { "fileIndex": 0, "record": 13, "element": 0 },
+      "recvMonoNs": "5001130000000",
+      "tradeId": "81234567",
+      "price": "62710.500000",
+      "size": "0.00120000",
+      "aggressor": "buy"
+    }
+  }
+}

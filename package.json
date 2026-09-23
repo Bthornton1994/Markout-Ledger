@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:schemas": "vitest run tests/schemas.test.ts",
     "replay": "tsx src/cli/main.ts replay",
     "fixtures": "tsx src/cli/main.ts generate-fixtures",
     "demo": "tsx src/cli/main.ts replay --scenario baseline --out out && tsx src/cli/main.ts replay --scenario riskgate --out out",
@@ -19,6 +20,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.20.3",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3",
     "vitest": "^5.0.1"

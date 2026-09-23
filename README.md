@@ -26,11 +26,12 @@ Requires Node.js >= 22.
 ```bash
 npm install
 npm run typecheck      # tsc --noEmit
-npm test               # vitest, behavioural tests
+npm test               # vitest, behavioural tests (includes the schema tests)
+npm run test:schemas   # JSON Schema validation only: schemas/ against schemas/examples/ and failure cases
 npm run demo           # replays both scenarios, prints summaries, writes out/<scenario>/
 ```
 
-The same three commands run in CI on every pull request (`.github/workflows/ci.yml`), which also uploads the demo's `out/` directory as a build artifact.
+CI runs the schema validation as its own step, then the same three commands, on every pull request (`.github/workflows/ci.yml`), and uploads the demo's `out/` directory as a build artifact.
 
 `npm run demo` replays two fixed, seeded fixtures (13 and 12 controller windows) and compares three runs on each:
 
@@ -72,7 +73,7 @@ docs/           schema, accounting, execution model, controller contract, replay
 - [docs/CONTROLLER.md](docs/CONTROLLER.md): two-clock timing, instruction contract and bounds, acceptance rules, the LLM interface
 - [docs/REPLAY.md](docs/REPLAY.md): commands, flags, outputs, adding scenarios
 - [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md): limitations of the synthetic data and what real data a credible evaluation needs
-- Milestone 2 (recorded data, contract only, no implementation yet; venue Kraken spot `BTC/USD`): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`. No recorded data is committed; captured data stays outside Git until its redistribution rights are established.
+- Milestone 2 (recorded data, contract only, no implementation yet; venue Kraken spot `BTC/USD`, selected provisionally): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`. No recorded data is committed. Nothing is captured until decision conditions C2 (a written record from Kraken or a qualified lawyer concluding the use is permitted) and C3 (the owner's jurisdiction confirmation) are met; raw captures never enter Git, and a recorded fixture is committed only if redistribution is granted in writing.
 
 ## Guarantees the tests establish
 
