@@ -66,6 +66,34 @@ function reasons(errors: ErrorObject[] | null | undefined): ExpectedError[] {
     .map((e) => ({ instancePath: e.instancePath, keyword: e.keyword, params: e.params as Record<string, unknown> }));
 }
 
+/**
+ * Values that contain no visible character under the schema's non-blank rule (fixture.v2 $defs/nonBlank). The first
+ * two are required in every rights text field; the rest exercise the other classes the rule excludes.
+ */
+const INVISIBLE_IN_EVERY_FIELD: [string, string][] = [
+  ['U+0085 (next line, Unicode whitespace outside ECMAScript \\s)', '\u0085'],
+  ['U+200B (zero-width space, a format character)', '\u200b'],
+];
+const INVISIBLE_IN_NOTE: [string, string][] = [
+  ['U+00A0 and U+3000 (other whitespace)', '\u00a0\u3000'],
+  ['U+FEFF and U+2060 (format characters)', '\ufeff\u2060'],
+  ['U+3164 (Hangul filler, default-ignorable)', '\u3164'],
+  ['U+0301 (a combining mark alone)', '\u0301'],
+  ['U+2800 (braille pattern blank)', '\u2800'],
+  ['U+303F (ideographic half fill space)', '\u303f'],
+  ['U+FFFC (object replacement character)', '\ufffc'],
+  ['U+13441 and U+13442 (Egyptian hieroglyph full and half blank)', '\u{13441}\u{13442}'],
+  ['U+1D159 (musical symbol null notehead)', '\u{1D159}'],
+];
+
+it('keeps the rights and A10 test sources pure ASCII, so every invisible test value is an escape that cannot be lost unseen', () => {
+  expect(INVISIBLE_IN_EVERY_FIELD.map(([, v]) => v.codePointAt(0))).toEqual([0x85, 0x200b]);
+  for (const [, value] of [...INVISIBLE_IN_EVERY_FIELD, ...INVISIBLE_IN_NOTE]) expect(value.length).toBeGreaterThan(0);
+  for (const file of ['tests/schemas.test.ts', 'tests/repository-jsonl.test.ts']) {
+    expect(readFileSync(new URL(file, repoRoot), 'utf8')).not.toMatch(/[^\t\n\r\x20-\x7e]/);
+  }
+});
+
 function derive(examples: Record<string, Json>, c: FailureCase): Json {
   const base = examples[c.from];
   if (!base) throw new Error(`no example named ${c.from}`);
@@ -238,6 +266,20 @@ describe('fixture.v2 schema', () => {
     expect(fixtureHeader(doc)).toBe(true);
   });
 
+  // The non-blank rule is about characters only: visible text in any script passes, including beside invisible
+  // characters, and a pass says nothing about whether the value is true or sufficient.
+  it('accepts non-blank rights text in any script, including a visible character beside invisible ones', () => {
+    const doc = structuredClone(fixtureExamples.header_recorded_qty8!);
+    doc.provenance.rights.checkedBy = 'Zo\u00eb \u00d8deg\u00e5rd';
+    doc.provenance.rights.termsUrl = '\u200bhttps://example.org/terms';
+    doc.provenance.rights.note = '\u78ba\u8a8d (constructed placeholder; establishes nothing)';
+    expect(fixtureHeader(doc)).toBe(true);
+    for (const value of ['x', '2026', '\u0085-', '\u0301a', '\u20ac', 'Zo\u00eb']) {
+      doc.provenance.rights.checkedBy = value;
+      expect(fixtureHeader(doc)).toBe(true);
+    }
+  });
+
   it('accepts additive undeclared fields where the schema is deliberately open (forward compatibility)', () => {
     const doc = structuredClone(fixtureExamples.header_recorded_qty8!);
     doc.provenance.capture.futureCounter = 0;
@@ -328,6 +370,21 @@ describe('fixture.v2 schema', () => {
       mutate: (d) => (d.provenance.rights.checkedBy = '\n '),
       expected: [{ instancePath: '/provenance/rights/checkedBy', keyword: 'pattern' }],
     },
+    ...(['termsUrl', 'checkedBy', 'note'] as const).flatMap((field) =>
+      [...INVISIBLE_IN_EVERY_FIELD, ...(field === 'note' ? INVISIBLE_IN_NOTE : [])].map(([label, value]) => ({
+        name: `a ${field} made only of ${label}${field === 'note' ? ' on a permitted block' : ''}`,
+        from: 'header_recorded_qty8',
+        target: fixtureHeader,
+        mutate: (d: Json) => {
+          if (field === 'note') {
+            d.provenance.rights.redistribution = 'permitted';
+            d.provenance.rights.publication = 'sample_permitted';
+          }
+          d.provenance.rights[field] = value;
+        },
+        expected: [{ instancePath: `/provenance/rights/${field}`, keyword: 'pattern' }],
+      })),
+    ),
     {
       name: 'a rights check date that is not a date (format)',
       from: 'header_recorded_qty8',
