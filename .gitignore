@@ -4,6 +4,6 @@ dist/
 *.log
 .DS_Store
 
-# Milestone 2: recorded market data never enters Git (docs/M2_DATA_CONTRACT.md section 6.3)
+# Milestone 2: raw captures and unpublished normalized output never enter Git (docs/M2_DATA_CONTRACT.md section 6.3)
 captures/
 normalized/

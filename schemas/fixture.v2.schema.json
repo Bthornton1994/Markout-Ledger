@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/fixture.v2.schema.json",
   "title": "Markout Ledger replay fixture, schema version 2",
-  "description": "A fixture is JSONL: the first line matches #/$defs/header, every following line matches #/$defs/event. Version 2 adds capture provenance, instrument specification and rights (all under provenance) and per-event raw references. Version 1 (synthetic) fixtures remain valid under the version-1 rules in docs/EVENT_SCHEMA.md and are not described here. Sizes are written with decimalsOf(header.qtyScale) places: six on the current engine, eight after the precision migration of docs/M2_GROK_HANDOFF.md section 0. See docs/M2_DATA_CONTRACT.md section 6.",
+  "description": "A fixture is JSONL: the first line matches #/$defs/header, every following line matches #/$defs/event. Version 2 adds capture provenance, instrument specification and rights (all under provenance) and per-event raw references. Version 1 (synthetic) fixtures remain valid under the version-1 rules in docs/EVENT_SCHEMA.md and are not described here. Sizes are written with decimalsOf(header.qtyScale) places: six on the current engine, eight after the precision migration of docs/M2_GROK_HANDOFF.md section 0. Unknown properties: objects accept properties they do not declare (additive, forward-compatible fields; contract sections 6 and 9), except provenance.capture.clockReports and each report in it, which are closed so that the verbatim clock report cannot enter them under another key; keeping it out of the fixture's other, open objects is the normalizer's rule (contract section 4.2), not the schema's. The schema checks presence and shape, never whether a field's content is true. See docs/M2_DATA_CONTRACT.md section 6.",
   "oneOf": [{ "$ref": "#/$defs/header" }, { "$ref": "#/$defs/event" }],
   "$defs": {
     "priceDecimal": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{6}$", "description": "non-negative decimal with exactly six places, as written by fmtPrice" },
@@ -11,11 +11,14 @@
     "ms": { "type": "integer", "minimum": 0 },
     "ns": { "type": "string", "pattern": "^[0-9]{1,20}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nonBlank": { "type": "string", "pattern": "\\S", "description": "a string with at least one non-whitespace character" },
     "software": { "type": "object", "required": ["name", "version"], "properties": { "name": { "type": "string" }, "version": { "type": "string" }, "commit": { "type": "string" } } },
     "softwareWithCommit": { "type": "object", "required": ["name", "version", "commit"], "properties": { "name": { "type": "string" }, "version": { "type": "string" }, "commit": { "type": "string" } } },
     "clock": {
       "type": "object",
+      "description": "parsed clock-sync fields only; closed to unknown keys so that the verbatim report (which names NTP servers by address) cannot enter a clock report under another key (contract section 4.2)",
       "required": ["source", "synchronized", "takenAtIso"],
+      "additionalProperties": false,
       "properties": {
         "source": { "enum": ["chrony", "ntpd", "ptp", "platform", "unknown"] },
         "report": false,
@@ -64,7 +67,7 @@
         "normalizer": { "$ref": "#/$defs/softwareWithCommit" },
         "adapter": { "$ref": "#/$defs/software" },
         "clockSync": { "enum": ["synchronized", "unknown"] },
-        "clockReports": { "type": "object", "required": ["start", "end"], "properties": { "start": { "$ref": "#/$defs/clock" }, "end": { "$ref": "#/$defs/clock" } } },
+        "clockReports": { "type": "object", "required": ["start", "end"], "additionalProperties": false, "properties": { "start": { "$ref": "#/$defs/clock" }, "end": { "$ref": "#/$defs/clock" } }, "description": "closed to unknown keys: only start and end, each a closed clock block (contract section 4.2)" },
         "venueClockOffsetMs": {
           "type": "object",
           "required": ["samples", "medianMs", "medianRttMs", "maxAbsMs", "resolutionMs", "source"],
@@ -91,12 +94,12 @@
       "type": "object",
       "required": ["termsUrl", "termsCheckedOn", "checkedBy", "redistribution", "publication"],
       "properties": {
-        "termsUrl": { "type": "string" },
+        "termsUrl": { "$ref": "#/$defs/nonBlank" },
         "termsCheckedOn": { "type": "string", "format": "date" },
-        "checkedBy": { "type": "string" },
+        "checkedBy": { "$ref": "#/$defs/nonBlank" },
         "redistribution": { "enum": ["permitted", "prohibited", "unclear"] },
         "publication": { "enum": ["hash_only", "sample_permitted"] },
-        "note": { "type": "string", "description": "required when redistribution is permitted: names the written record that meets decision condition C2 and grants redistribution (source, date, and where it is recorded); docs/M2_DATA_CONTRACT.md section 6.3" }
+        "note": { "$ref": "#/$defs/nonBlank", "description": "non-blank when present; required when redistribution is permitted, where it identifies the owner's nonprivileged attestation on pull request #3 that records the clearance of publishing recorded data under decision condition C2 (date, source, scope, outcome). The schema checks presence and shape only; whether the attested record exists and clears that scope is the owner's manual verification (docs/M2_DATA_CONTRACT.md section 6.3)" }
       },
       "allOf": [
         {
@@ -105,7 +108,7 @@
         },
         {
           "if": { "properties": { "redistribution": { "const": "permitted" } }, "required": ["redistribution"] },
-          "then": { "required": ["note"], "properties": { "note": { "type": "string", "minLength": 1 } } }
+          "then": { "required": ["note"], "properties": { "note": true } }
         }
       ]
     },

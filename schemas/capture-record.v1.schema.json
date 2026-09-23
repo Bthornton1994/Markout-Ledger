@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/capture-record.v1.schema.json",
   "title": "Markout Ledger raw capture record (capture format v1)",
-  "description": "One JSONL line of a first-party market-data capture. Every record carries the capture host's realtime clock in integer milliseconds (recvWallMs, from Date.now()) and its monotonic clock in nanoseconds (recvMonoNs, from process.hrtime.bigint(), as a decimal string), both taken at receipt before parsing (at send time for subscribe/unsubscribe/ping records). Payloads are verbatim. Venue-agnostic; see docs/M2_DATA_CONTRACT.md section 4.",
+  "description": "One JSONL line of a first-party market-data capture. Every record carries the capture host's realtime clock in integer milliseconds (recvWallMs, from Date.now()) and its monotonic clock in nanoseconds (recvMonoNs, from process.hrtime.bigint(), as a decimal string), both taken at receipt before parsing (at send time for subscribe/unsubscribe/ping records). Payloads are verbatim. Records accept properties they do not declare (additive fields; contract section 6), except manifest_start.host, which is closed so that the host block carries only os and runtime, never the capture host's hostname or address (contract section 4.1). Venue-agnostic; see docs/M2_DATA_CONTRACT.md section 4.",
   "type": "object",
   "required": ["type", "recvWallMs", "recvMonoNs"],
   "properties": {

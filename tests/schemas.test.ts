@@ -187,10 +187,22 @@ describe('capture-record.v1 schema', () => {
       mutate: (d) => (d.sha256 = 'B'.repeat(64)),
       expected: [{ instancePath: '/sha256', keyword: 'pattern' }],
     },
+    {
+      name: 'manifest_start whose host block carries a hostname (closed object)',
+      from: 'manifest_start',
+      mutate: (d) => (d.host.hostname = 'capture-box-1'),
+      expected: [{ instancePath: '/host', keyword: 'additionalProperties', params: { additionalProperty: 'hostname' } }],
+    },
   ];
 
   it.each(failures)('rejects $name, for that reason only', (c) => {
     expectFailure(capture, derive(captureExamples, c), c.expected);
+  });
+
+  it('accepts an additive undeclared field where the schema is deliberately open (forward compatibility)', () => {
+    const doc = structuredClone(captureExamples.note!);
+    doc.futureField = 'additive';
+    expect(capture(doc)).toBe(true);
   });
 
   it('accepts processingMs of zeros (no frame received)', () => {
@@ -216,12 +228,24 @@ describe('fixture.v2 schema', () => {
     expect(fixture({ type: 'quote', seq: 0 })).toBe(false);
   });
 
-  it('accepts sample_permitted publication when redistribution is permitted and the note names the C2 record', () => {
+  // Constructed example: a schema pass checks the note's presence and shape only. It cannot show that the
+  // attested record exists or clears anything; the owner verifies that substance by hand (contract section 6.3).
+  it('accepts the shape of a permitted block with a non-blank placeholder note (constructed; establishes no permission)', () => {
     const doc = structuredClone(fixtureExamples.header_recorded_qty8!);
     doc.provenance.rights.redistribution = 'permitted';
     doc.provenance.rights.publication = 'sample_permitted';
-    doc.provenance.rights.note = 'constructed example: redistribution granted by <written record, date, pull request #3 comment>';
+    doc.provenance.rights.note = 'constructed placeholder: a real note identifies the owner attestation on pull request #3; this text establishes nothing';
     expect(fixtureHeader(doc)).toBe(true);
+  });
+
+  it('accepts additive undeclared fields where the schema is deliberately open (forward compatibility)', () => {
+    const doc = structuredClone(fixtureExamples.header_recorded_qty8!);
+    doc.provenance.capture.futureCounter = 0;
+    doc.provenance.rights.futureField = 'additive';
+    expect(fixtureHeader(doc)).toBe(true);
+    const event = structuredClone(fixtureExamples.event_trade!);
+    event.futureField = 'additive';
+    expect(fixtureTrade(event)).toBe(true);
   });
 
   const failures: (FailureCase & { target: ValidateFunction })[] = [
@@ -240,7 +264,7 @@ describe('fixture.v2 schema', () => {
       expected: [{ instancePath: '/provenance/rights/redistribution', keyword: 'const', params: { allowedValue: 'permitted' } }],
     },
     {
-      name: 'redistribution permitted without a note naming the C2 record',
+      name: 'redistribution permitted without a note',
       from: 'header_recorded_qty8',
       target: fixtureHeader,
       mutate: (d) => {
@@ -257,7 +281,52 @@ describe('fixture.v2 schema', () => {
         d.provenance.rights.redistribution = 'permitted';
         d.provenance.rights.note = '';
       },
-      expected: [{ instancePath: '/provenance/rights/note', keyword: 'minLength' }],
+      expected: [{ instancePath: '/provenance/rights/note', keyword: 'pattern' }],
+    },
+    {
+      name: 'redistribution permitted with a whitespace-only note',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => {
+        d.provenance.rights.redistribution = 'permitted';
+        d.provenance.rights.note = ' \t ';
+      },
+      expected: [{ instancePath: '/provenance/rights/note', keyword: 'pattern' }],
+    },
+    {
+      name: 'a whitespace-only note on a hash-only block',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.rights.note = '   '),
+      expected: [{ instancePath: '/provenance/rights/note', keyword: 'pattern' }],
+    },
+    {
+      name: 'an empty terms URL',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.rights.termsUrl = ''),
+      expected: [{ instancePath: '/provenance/rights/termsUrl', keyword: 'pattern' }],
+    },
+    {
+      name: 'a whitespace-only terms URL',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.rights.termsUrl = '   '),
+      expected: [{ instancePath: '/provenance/rights/termsUrl', keyword: 'pattern' }],
+    },
+    {
+      name: 'an empty checker',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.rights.checkedBy = ''),
+      expected: [{ instancePath: '/provenance/rights/checkedBy', keyword: 'pattern' }],
+    },
+    {
+      name: 'a whitespace-only checker',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.rights.checkedBy = '\n '),
+      expected: [{ instancePath: '/provenance/rights/checkedBy', keyword: 'pattern' }],
     },
     {
       name: 'a rights check date that is not a date (format)',
@@ -314,6 +383,20 @@ describe('fixture.v2 schema', () => {
       target: fixtureHeader,
       mutate: (d) => (d.provenance.capture.clockReports.start.report = '<verbatim chronyc tracking output>'),
       expected: [{ instancePath: '/provenance/capture/clockReports/start/report', keyword: 'false schema' }],
+    },
+    {
+      name: 'a fixture clock report carrying the report text under another key (closed object)',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.clockReports.end.reportText = '<verbatim chronyc tracking output>'),
+      expected: [{ instancePath: '/provenance/capture/clockReports/end', keyword: 'additionalProperties', params: { additionalProperty: 'reportText' } }],
+    },
+    {
+      name: 'a clock-reports container carrying the report text beside start and end (closed object)',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.clockReports.startReport = '<verbatim chronyc tracking output>'),
+      expected: [{ instancePath: '/provenance/capture/clockReports', keyword: 'additionalProperties', params: { additionalProperty: 'startReport' } }],
     },
     {
       name: 'a venue clock offset without its resolution',
