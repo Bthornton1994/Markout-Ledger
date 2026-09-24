@@ -80,8 +80,8 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
   });
 
   it('allows PR-1 exactly one change to a compared path, the A10 extension, and every place that asks for it names the same two files', () => {
-    expect(gate).toMatch(/which adds refusals and removes none; PR-1's description lists those changes, and PR-1's own exact-SHA QA covers them/);
-    expect(gate).toMatch(/Once PR-1 has merged, those two paths are compared with PR-1's cleared SHA instead of X/);
+    expect(gate).toMatch(/which adds refusals and removes none; PR-1's description lists those changes, and the exact-SHA QA that clears PR-1 \(step 5\) covers them/);
+    expect(gate).toMatch(/Once PR-1 has merged, those two paths are compared with Y, the SHA at which that QA cleared PR-1 \(step 5\), instead of X/);
     expect(gate).toMatch(/repeats step 2's content check on that `main` commit against that change's cleared SHA/);
     expect(row('A10')).toMatch(/PR-1 extends the recorded kind, in `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts` \(the one change to a compared path that Gate and sequence step 2 allows PR-1\)/);
     expect(handoff).toMatch(/the PR description lists every change to `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts`, the only compared paths PR-1 changes and only for the A10 extension \(Gate and sequence step 2\), for the owner's review; `tests\/a10-history-cli\.ts`, `\.githooks\/pre-push` and `\.github\/workflows\/ci\.yml` are unchanged/);
@@ -91,6 +91,35 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
     for (const [name, text] of docs) {
       expect(text, name).not.toMatch(/PR-0 and PR-1 never change these paths/);
       expect(text, name).not.toMatch(/lists every change to `tests\/jsonl-policy\.ts`, `tests\/a10-history-cli\.ts`/);
+    }
+  });
+
+  it('defines the exact-SHA QA that clears PR-1 with step 1\'s checks, and names its cleared SHA as the baseline once PR-1 has merged (Q1)', () => {
+    const step5 = gate.slice(gate.indexOf('5. **PR-1**'));
+    expect(step5).toMatch(/PR-1 is cleared the way step 1 clears pull request #3: a read-only QA clears one full 40-character commit SHA of PR-1, called Y here/);
+    expect(step5).toMatch(/the reviewer verifies, when the QA starts and again when it reports, that Y is the live head of PR-1, and says so in the report/);
+    expect(step5).toMatch(/having authored neither Y, nor any other commit of PR-1, nor any of its self-audits, and not being an agent run by a session that did \(the implementer, its session and its agents are not independent\)/);
+    expect(step5).toMatch(/any later push to PR-1 voids the clearance, and no earlier QA transfers to another SHA/);
+    expect(step5).toMatch(/The owner merges PR-1 only while its head is Y, checked as step 2 checks X \(identity: PR-1 is merged and its last commit is Y\)/);
+    expect(step5).toMatch(/Once PR-1 has merged, step 2's content check compares `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts` with Y and every other compared path with X, or with the cleared SHA of the last step 3a change that changed it/);
+    expect(prompt).toMatch(/cleared by an exact-SHA QA under handoff Gate and sequence step 5 \(the checks and independence of step 1 applied to PR-1: a reviewer who is not you, your session or your agents verifies that the SHA it clears is PR-1's live head when the QA starts and when it reports, and any later push voids it\) before the owner merges it while its head is that SHA/);
+    // The undefined phrases the re-audit of e8764f1 found (Q1) are gone.
+    for (const [name, text] of docs) {
+      expect(text, name).not.toMatch(/PR-1's own exact-SHA QA/);
+      expect(text, name).not.toMatch(/PR-1's cleared SHA/);
+    }
+  });
+
+  it('routes every change to a schema, its examples or tests/schemas.test.ts through its own step 3a pull request with its own exact-SHA QA, never PR-1 (Q2)', () => {
+    expect(gate).toMatch(/Any change to the contract's documents, to a schema under `schemas\/`, to its examples under `schemas\/examples\/` or to `tests\/schemas\.test\.ts` after pull request #3 merges/);
+    expect(gate).toMatch(/is its own documents pull request, cleared under step 1's rules applied to that pull request/);
+    expect(row('S7')).toMatch(/the contract documents \(`docs\/M2_\*\.md`\), `schemas\/` \(the schemas and `schemas\/examples\/`\) and `tests\/schemas\.test\.ts` stay the source of truth and PR-1 never edits them/);
+    expect(handoff).toMatch(/PR-1 changes no schema, no file under `schemas\/examples\/` and not `tests\/schemas\.test\.ts` \(S7, Gate and sequence step 2\): a change to any of the three JSON Schemas is its own documents pull request under Gate and sequence step 3a, with its own exact-SHA QA, and updates `schemas\/examples\/` and `tests\/schemas\.test\.ts` in that pull request/);
+    expect(prompt).toMatch(/you change no schema, no file under schemas\/examples and not tests\/schemas\.test\.ts: a schema change, with its examples and tests\/schemas\.test\.ts, is its own documents pull request under handoff Gate and sequence step 3a with its own exact-SHA QA, never part of PR-1/);
+    // The wording that put a schema change inside PR-1 (Q2) is gone.
+    for (const [name, text] of docs) {
+      expect(text, name).not.toMatch(/`tests\/schemas\.test\.ts` in the same PR/);
+      expect(text, name).not.toMatch(/updating schemas\/examples and tests\/schemas\.test\.ts with any schema change/);
     }
   });
 
@@ -105,7 +134,7 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
   });
 
   it('routes every contract change after the merge through its own cleared documents pull request, never through PR-0 or PR-1', () => {
-    expect(gate).toMatch(/3a\. \*\*A documents change after the merge, when one is needed\.\*\* Any change to the contract's documents or schemas after pull request #3 merges .* is its own documents pull request, cleared under step 1's rules applied to that pull request/);
+    expect(gate).toMatch(/3a\. \*\*A documents change after the merge, when one is needed\.\*\* Any change to the contract's documents, to a schema under `schemas\/`, to its examples under `schemas\/examples\/` or to `tests\/schemas\.test\.ts` after pull request #3 merges .* is its own documents pull request, cleared under step 1's rules applied to that pull request/);
     expect(gate).toMatch(/The implementer never makes these changes inside PR-0 or PR-1/);
     expect(gate).toMatch(/A step 3a change merged after PR-1 has branched is taken into PR-1 before any capture/);
     expect(row('S7')).toMatch(/PR-1 never edits them/);
