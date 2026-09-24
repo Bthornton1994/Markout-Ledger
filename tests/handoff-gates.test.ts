@@ -1,7 +1,8 @@
 // Acceptance cases for the gates the owner and the implementer read before any build or capture (docs/M2_GROK_HANDOFF.md,
 // "Gate and sequence"; docs/M2_DATA_SOURCE_DECISION.md section 1): the order from pull request #3 to PR-0 and PR-1, the
-// C5 capture gate, and the independent QA of one exact commit. These are text checks: they fail when a document loses
-// or contradicts a gate, not when someone ignores one.
+// C5 capture gate, the independent QA of one exact commit, and the limits of the A10 layers and of the normalize-report
+// checks, which no document may present as complete. These are text checks: they fail when a document loses or
+// contradicts a gate, not when someone ignores one.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -162,5 +163,28 @@ describe('independent QA of one exact commit (handoff, Gate and sequence, step 1
       expect(text, name).not.toMatch(/commit named in the pull request's QA request/);
       expect(text, name).not.toMatch(/latest QA request/i);
     }
+  });
+});
+
+describe('no document presents a layer, a check or a list of residual routes as complete', () => {
+  const hook = read('.githooks/pre-push');
+
+  it('states the lists of what no A10 layer sees and what the report checks cannot rule out as not exhaustive', () => {
+    expect(contract).toMatch(/What no layer sees includes at least the following \(the list is not exhaustive, and no layer, nor the three together, is claimed to catch every way recorded data can reach the repository or GitHub\):/);
+    expect(contract).toMatch(/cannot rule out is a recorded value encoded into any of the report's constrained values, in ways that include at least these \(the list is not exhaustive\):/);
+    expect(contract).toMatch(/The cross-reference checks test consistency, not truth\./);
+    expect(blocked).toMatch(/contract §6\.5, which lists further routes no layer sees; that list is not exhaustive either/);
+  });
+
+  it('calls the hook and CI prevention only in the negative, and drops the closed-report overclaim', () => {
+    for (const [name, text] of [...docs, ['.githooks/pre-push', hook] as [string, string]]) {
+      for (const m of text.matchAll(/complete prevention/g)) {
+        const before = text.slice(Math.max(0, m.index - 60), m.index);
+        expect(before, name).toMatch(/(not a guarantee and not|none of the three layers is|opt-in and not) $/);
+      }
+      expect(text, name).not.toMatch(/so the report carries nothing else/);
+    }
+    expect(contract).toMatch(/none of the three layers is complete prevention/);
+    expect(hook).toMatch(/It is a local, bypassable control, not a guarantee and not complete prevention/);
   });
 });
