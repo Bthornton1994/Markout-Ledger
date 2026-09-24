@@ -66,7 +66,7 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
   });
 
   it('compares the same full list of contract paths in the gate and the prompt, and stops when a merged PR-0 changed one', () => {
-    const expected = ['docs/M2_DATA_CONTRACT.md', 'docs/M2_DATA_SOURCE_DECISION.md', 'docs/M2_EVALUATION_PROTOCOL.md', 'docs/M2_GROK_HANDOFF.md', 'schemas', 'tests/jsonl-policy.ts', 'tests/a10-history-cli.ts', 'tests/repository-jsonl.test.ts', 'tests/capture-structure.ts', 'tests/capture-structure.test.ts', 'tests/handoff-gates.test.ts', 'tests/schemas.test.ts', '.githooks/pre-push', '.github/workflows/ci.yml', '.gitignore', 'package.json'];
+    const expected = ['docs/M2_DATA_CONTRACT.md', 'docs/M2_DATA_SOURCE_DECISION.md', 'docs/M2_EVALUATION_PROTOCOL.md', 'docs/M2_GROK_HANDOFF.md', 'schemas', 'tests/jsonl-policy.ts', 'tests/a10-history-cli.ts', 'tests/repository-jsonl.test.ts', 'tests/capture-structure.ts', 'tests/capture-structure.test.ts', 'tests/handoff-gates.test.ts', 'tests/schemas.test.ts', '.githooks/pre-push', '.github/workflows/ci.yml', '.gitignore', 'package.json', 'package-lock.json', 'tsconfig.json', 'vitest.config.ts'];
     const list = (text: string, marker: string): string[] => {
       const i = text.indexOf(marker);
       expect(i).toBeGreaterThanOrEqual(0);
@@ -76,6 +76,16 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
     expect(list(prompt, 'git diff --quiet X <the commit you branch from> -- ')).toEqual(expected);
     expect(gate).toMatch(/PR-0 and PR-1 never change these paths: if a merged PR-0 has changed any of them, the implementer stops and reports/);
     expect(row('PA6')).toMatch(/never a path that Gate and sequence step 2 compares/);
+  });
+
+  it('needs no change to a compared path from PR-1: engines.node is already the Node version S1 relies on', () => {
+    const pkg = JSON.parse(read('package.json')) as { engines: { node: string } };
+    const lock = JSON.parse(read('package-lock.json')) as { packages: Record<string, { engines?: { node: string } }> };
+    expect(pkg.engines.node).toBe('>=22.4');
+    expect(lock.packages['']?.engines?.node).toBe('>=22.4');
+    expect(row('S1')).toMatch(/`engines\.node` is already `>=22\.4`, set by pull request #3; PR-1 changes no path Gate and sequence step 2 compares, `package\.json` included/);
+    expect(prompt).toMatch(/engines\.node is already >=22\.4, set by pull request #3; you change no path the check of \(2\) above compares, package\.json included/);
+    for (const [name, text] of docs) expect(text, name).not.toMatch(/set `?engines\.node`? to/);
   });
 
   it('routes every contract change after the merge through its own cleared documents pull request, never through PR-0 or PR-1', () => {

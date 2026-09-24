@@ -6,7 +6,7 @@
   "description": "Research replay engine and append-only decision ledger for a two-clock (fast policy / slow steering controller) paper-trading study. Synthetic research output only.",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.4"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

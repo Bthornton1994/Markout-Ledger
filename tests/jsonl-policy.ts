@@ -44,7 +44,8 @@
 // read, gets only a content check (rawRecordLine): a raw capture record on a line of its own is found under any name,
 // but not one spread over several lines, embedded in other text, encoded, compressed or in a file that is not UTF-8
 // text, and no other form of recorded data (a recorded fixture or unwrapped venue frames under another name, a report
-// under a name not ending in .normalize-report.json, exports of recorded values). Review remains the control for those.
+// under a name not ending in .normalize-report.json, exports of recorded values, values in names or identity fields).
+// A tracked Git LFS pointer is refused, since its content lives outside git. Review remains the control for the rest.
 //
 // Two scopes use the same rule: trackedHygieneFiles lists the tree under test (the files tracked at this moment), and
 // historyViolations scans every commit of a commit range, so a file added and deleted again inside the range is still
@@ -138,16 +139,22 @@ function isRawCaptureRecord(v: Record<string, any>): boolean {
   return (typeof v.type === 'string' && CAPTURE_RECORD_TYPES.has(v.type)) || ('recvWallMs' in v && 'recvMonoNs' in v);
 }
 
+/** Every line terminator of Unicode (CR LF, LF, CR, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR). */
+const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
+/** White space and format characters (Unicode Cf: zero-width space, word joiner, byte order mark ...) at either end. */
+const LINE_PADDING = /^[\s\p{Cf}]+|[\s\p{Cf}]+$/gu;
+
 /**
  * The 1-based number of the first line of `text` that, trimmed, is a JSON object that is a raw capture record, or
  * undefined. This is the content check applied to every tracked text file the three kinds above do not cover: it finds
- * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). It cannot see a record
- * spread over several lines, embedded in other text, compressed, encoded or in a binary file (contract section 6.5).
+ * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). Lines are split at every
+ * Unicode line terminator and trimmed of white space and format characters at both ends. It cannot see a record spread
+ * over several lines, embedded in other text, compressed, encoded or in a binary file (contract section 6.5).
  */
 export function rawRecordLine(text: string): number | undefined {
-  const lines = text.split('\n');
+  const lines = text.split(LINE_BREAK);
   for (const [i, raw] of lines.entries()) {
-    const line = raw.trim();
+    const line = raw.replace(LINE_PADDING, '');
     if (!line.startsWith('{') || !line.endsWith('}')) continue;
     let value: unknown;
     try {
@@ -160,8 +167,12 @@ export function rawRecordLine(text: string): number | undefined {
   return undefined;
 }
 
-/** The verdict for a tracked file outside the three kinds: text is checked for raw capture record lines; bytes that are
- * not UTF-8 (binary or compressed files) are not inspected. */
+/** The first line of a Git LFS pointer file (the LFS specification's version URL, current and legacy). */
+const LFS_POINTER = /^version https:\/\/(git-lfs|hawser)\.github\.com\/spec\/v1\r?\n/;
+
+/** The verdict for a tracked file outside the three kinds: a Git LFS pointer is refused, since its content lives in the
+ * LFS store outside git, where no layer reads it; other text is checked for raw capture record lines; bytes that are not
+ * UTF-8 (binary or compressed files) are not inspected. */
 export function classifyOtherFile(bytes: Uint8Array): Verdict {
   let text: string;
   try {
@@ -169,6 +180,7 @@ export function classifyOtherFile(bytes: Uint8Array): Verdict {
   } catch {
     return { ok: true, kind: 'not_inspected' };
   }
+  if (LFS_POINTER.test(text)) return fail('a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it');
   const line = rawRecordLine(text);
   return line === undefined ? { ok: true, kind: 'other_text' } : fail(`line ${line} is a raw capture record, in a file the fixture rules do not cover`);
 }

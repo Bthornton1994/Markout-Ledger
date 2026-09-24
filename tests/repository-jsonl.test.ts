@@ -193,6 +193,32 @@ describe('A10 file listing (the tree under test)', () => {
     });
   });
 
+  it('splits lines at every Unicode line terminator and trims format characters, so CR, NEL, U+2028 or a zero-width prefix hides no record', () => {
+    const record = JSON.stringify(captureExamples.message_trade);
+    const found = (line: number) => ({ ok: false, reason: `line ${line} is a raw capture record, in a file the fixture rules do not cover` });
+    expect(classifyOtherFile(Buffer.from(`a note\r${record}\r`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(`a note\r\n${record}\r\n`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(`a note\u0085${record}`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(`a note\u2028${record}\u2029after`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(`\u200b${record}\u2060\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`\ufeff${record}\n`))).toEqual(found(1));
+  });
+
+  it('refuses a Git LFS pointer, whose content lives in the LFS store outside git, in the tree and in the history', () => {
+    const pointer = 'version https://git-lfs.github.com/spec/v1\noid sha256:' + 'a'.repeat(64) + '\nsize 1048576\n';
+    const reason = 'a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it';
+    expect(classifyOtherFile(Buffer.from(pointer))).toEqual({ ok: false, reason });
+    expect(classifyOtherFile(Buffer.from(pointer.replace('git-lfs', 'hawser')))).toEqual({ ok: false, reason });
+    expect(classifyOtherFile(Buffer.from('see version https://git-lfs.github.com/spec/v1 for the format\n'))).toEqual({ ok: true, kind: 'other_text' });
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const base = commitAll(root, 'base');
+    writeFileSync(join(root, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
+    writeFileSync(join(root, 'capture.bin'), pointer);
+    const added = commitAll(root, 'track a capture through Git LFS');
+    expect(classifyOtherPath('capture.bin', root)).toEqual({ ok: false, reason });
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([{ commit: added, path: 'capture.bin', reason }]);
+  });
+
   it('documents what the content check cannot see: a record over several lines, inside other text, or compressed', () => {
     // Disclosed limits (contract section 6.5), not guarantees: each of these passes the check.
     const record = captureExamples.message_trade!;

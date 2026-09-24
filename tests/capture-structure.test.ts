@@ -79,11 +79,14 @@ class Tape {
     const times = timed ? { time_in: '2026-10-06T12:00:30.000000Z', time_out: '2026-10-06T12:00:30.000020Z' } : {};
     return this.push('message', { stream: 'method:pong', payload: JSON.stringify({ method: 'pong', req_id: reqId, ...times }) });
   }
-  instrument(type: 'snapshot' | 'update' = 'snapshot', pair: Pair = {}): number {
+  /** An instrument frame with one pair entry, `pair` over the selected instrument's values, and any further entries. */
+  instrument(type: 'snapshot' | 'update' = 'snapshot', pair: Pair = {}, ...more: Pair[]): number {
     // Built as text so the increments keep the lexemes a vector gives them.
-    const p = { symbol: 'BTC/USD', status: 'online', qtyPrecision: 8, pricePrecision: 1, qtyIncrement: '0.00000001', priceIncrement: '0.1', ...pair };
-    const entry = `{"symbol":"${p.symbol}","base":"BTC","quote":"USD","status":"${p.status}","qty_precision":${p.qtyPrecision},"price_precision":${p.pricePrecision},"qty_increment":${p.qtyIncrement},"price_increment":${p.priceIncrement},"qty_min":0.00005}`;
-    return this.push('message', { stream: 'instrument', payload: `{"channel":"instrument","type":"${type}","data":{"assets":[],"pairs":[${entry}]}}` });
+    const entry = (q: Pair): string => {
+      const p = { symbol: 'BTC/USD', status: 'online', qtyPrecision: 8, pricePrecision: 1, qtyIncrement: '0.00000001', priceIncrement: '0.1', ...q };
+      return `{"symbol":"${p.symbol}","base":"BTC","quote":"USD","status":"${p.status}","qty_precision":${p.qtyPrecision},"price_precision":${p.pricePrecision},"qty_increment":${p.qtyIncrement},"price_increment":${p.priceIncrement},"qty_min":0.00005}`;
+    };
+    return this.push('message', { stream: 'instrument', payload: `{"channel":"instrument","type":"${type}","data":{"assets":[],"pairs":[${[pair, ...more].map(entry).join(',')}]}}` });
   }
   book(type: 'snapshot' | 'update' = 'update', symbol = 'BTC/USD'): number {
     return this.push('message', { stream: 'book', payload: `{"channel":"book","type":"${type}","data":[{"symbol":"${symbol}","bids":[{"price":62710.4,"qty":0.25}],"asks":[{"price":62710.5,"qty":0.5}],"checksum":1234567890,"timestamp":"2026-10-06T12:00:01.000000Z"}]}` });
@@ -101,7 +104,6 @@ class Tape {
     r.sentMonoNs = String(BigInt(r.recvMonoNs) - BigInt(sentBeforeMs) * 1_000_000n);
     return i;
   }
-  /** Opens a socket that passes its subscription gate, then a book snapshot, an update and a trade. */
   /** Opens a socket that passes its subscription gate, then a book snapshot, an update (its first event) and a trade. */
   subscribedSocket(opts: { timed?: boolean } = {}): { open: number; gate: number; update: number; trade: number } {
     const open = this.open();
@@ -127,10 +129,13 @@ class Tape {
    * Ends the stream with file_end and manifest_end, then fills in every file record from the records actually written:
    * each file is one JSON.stringify(record) + '\n' line per record, a file_end's sha256 is the SHA-256 of its file's
    * bytes before it and its records their count, a file_start names the previous file's hash, and manifest_end lists
-   * every file and counts the records by type. So a normalizer's R1b hash checks pass on every vector.
+   * every file and counts the records by type. So a normalizer's R1b hash checks pass on every vector. With
+   * `fileEnd: false` the last file has no file_end: manifest_end lists it with the hash of every byte of it (contract
+   * section 5.10), so its missing file_end is the only fault left for the record rules (R10).
    */
-  end(): RawRecord[] {
-    this.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) });
+  end(opts: { fileEnd?: boolean } = {}): RawRecord[] {
+    const fileEnd = opts.fileEnd ?? true;
+    if (fileEnd) this.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) });
     const { type: _t2, recvWallMs: _w2, recvMonoNs: _m2, ...me } = structuredClone(examples.manifest_end);
     this.push('manifest_end', me);
     const files: { fileIndex: number; sha256: string; records: number }[] = [];
@@ -149,6 +154,7 @@ class Tape {
       if (r.type === 'file_start') Object.assign(r, { fileIndex: Math.max(files.length, 1), previousFileSha256: files[files.length - 1]?.sha256 ?? '0'.repeat(64) });
       lines.push(JSON.stringify(r) + '\n');
     }
+    if (!fileEnd) files.push({ fileIndex: files.length, sha256: createHash('sha256').update(lines.join('')).digest('hex'), records: lines.length });
     Object.assign(this.records[this.records.length - 1]!, { files, counts });
     return this.records;
   }
@@ -295,14 +301,45 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
     expect(r.fixtureEligible).toBe(false);
   });
 
-  it('refuses a manifest_end that does not directly follow the last file_end (R10)', () => {
+  it('refuses a manifest_end that does not directly follow the last file_end (R10), with real hashes so step (1) passes', () => {
     const t = new Tape();
     t.subscribedSocket();
     t.close('capture_end');
-    const { type: _t, recvWallMs: _w, recvMonoNs: _m, ...me } = structuredClone(examples.manifest_end);
-    t.push('manifest_end', me);
-    schemaValid(t.records);
-    expect(analyzeCapture(t.records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/manifest_end that does not follow the last file_end/) });
+    const records = t.end({ fileEnd: false });
+    schemaValid(records);
+    expect(records.filter((r) => r.type === 'file_end')).toHaveLength(0);
+    expect(records[records.length - 1]).toMatchObject({ type: 'manifest_end', files: [{ fileIndex: 0, records: records.length - 1 }] });
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/manifest_end that does not follow the last file_end/) });
+  });
+
+  it('refuses a stream that does not begin with manifest_start or does not end with manifest_end (R1, before any record rule)', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    t.close('capture_end');
+    const records = t.end();
+    const swapped = [records[1]!, records[0]!, ...records.slice(2)];
+    schemaValid(swapped);
+    expect(analyzeCapture(swapped, BTC).refused).toMatchObject({ rule: 'R1', at: 0, reason: expect.stringMatching(/does not begin with manifest_start/) });
+    // A missing manifest_end is R1 even when an earlier record breaks a record rule (R10 here: a trade outside a socket).
+    const u = new Tape();
+    u.trade();
+    u.subscribedSocket();
+    u.close('capture_end');
+    const truncated = u.end().slice(0, -1);
+    schemaValid(truncated);
+    expect(analyzeCapture(truncated, BTC).refused).toMatchObject({ rule: 'R1', at: truncated.length - 1, reason: expect.stringMatching(/does not end with manifest_end/) });
+    expect(analyzeCapture(u.records, BTC).refused).toMatchObject({ rule: 'R10', at: 1 });
+    expect(analyzeCapture([], BTC).refused).toMatchObject({ rule: 'R1', at: 0 });
+  });
+
+  it('refuses a second manifest_start (R10)', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    const second = t.push('manifest_start', { ...structuredClone(examples.manifest_start) });
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R10', at: second, reason: expect.stringMatching(/a second manifest_start/) });
   });
 
   it('accepts a clock step first visible on the end settlement when nothing but file_end and manifest_end follows it', () => {
@@ -633,6 +670,27 @@ describe('M2: every request, response and instrument snapshot matches the select
     }
   });
 
+  it('refuses the capture when an instrument frame lists the pair twice (R5), even when the first entry is correct', () => {
+    for (const type of ['snapshot', 'update'] as const) {
+      const r = socketWith((t) => {
+        t.subscribedSocket();
+        t.instrument(type, {}, { qtyPrecision: 6 });
+      });
+      expect(r.refused, type).toMatchObject({ rule: 'R5', reason: expect.stringMatching(/lists BTC\/USD more than once/) });
+      expect(r.fixtureEligible).toBe(false);
+    }
+    // Two identical entries are refused as well: the rule counts entries, it does not compare them.
+    const same = new Tape();
+    same.open();
+    const ids = (['book', 'trade', 'instrument'] as const).map((c) => [c, same.sub(c)] as const);
+    for (const [c, id] of ids) same.ack(id, c);
+    const at = same.instrument('snapshot', {}, {});
+    same.close('capture_end');
+    const records = same.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R5', at });
+  });
+
   it('compares increments by value, not by lexeme', () => {
     const r = socketWith((t) => {
       t.subscribedSocket();
@@ -754,6 +812,13 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     for (const bad of ['2026-02-30T12:00:00.100000Z', '2026-10-06T24:00:00Z', '2016-12-31T23:59:60Z', '2026-10-06t12:00:00z', '2026-10-06T12:00:00+24:00', '2026-10-06T12:60:00Z']) expect(rfc3339Micros(bad), bad).toBeUndefined();
     expect(rfc3339Micros('2024-02-29T00:00:00Z')).toBe(BigInt(Date.UTC(2024, 1, 29)) * 1000n);
     expect(rfc3339Micros('2026-10-06T14:00:00.000001+02:00')).toBe(1791288000000001n);
+  });
+
+  it('converts the years 0000 to 0099 exactly, not as 1900 to 1999 (proleptic Gregorian; values computed independently)', () => {
+    expect(rfc3339Micros('0099-01-01T00:00:00Z')).toBe(-59042995200000000n);
+    expect(rfc3339Micros('0000-02-29T00:00:00Z')).toBe(-62162121600000000n);
+    expect(rfc3339Micros('0099-12-31T23:59:59.123456+01:00')).toBe(-59011462800876544n);
+    expect(rfc3339Micros('0001-02-29T00:00:00Z')).toBeUndefined();
   });
 
   it('owns no sample of another socket and none after its own end record', () => {

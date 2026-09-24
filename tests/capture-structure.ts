@@ -42,10 +42,11 @@ export interface SocketReport {
 
 export interface CaptureReport {
   /**
-   * A capture-level refusal (R1b, R5 or R10) with the stream index at which the checker found it, or null. The
-   * normalize report names R5 by rule and field only (its at is null, section 5.10); R1b and R10 name this record.
+   * A capture-level refusal (R1, R1b, R5 or R10) with the stream index at which the checker found it, or null. R1 here
+   * is a missing manifest_start or manifest_end only, compared by rule (handoff A7(r)); the normalize report names R5
+   * by rule and field only (its at is null, section 5.10); R1b and R10 name this record.
    */
-  refused: { rule: 'R1b' | 'R5' | 'R10'; at: number; reason: string } | null;
+  refused: { rule: 'R1' | 'R1b' | 'R5' | 'R10'; at: number; reason: string } | null;
   sockets: SocketReport[];
   /**
    * Trade items of another pair in trade update frames on sockets R9 does not refuse: each is dropped.foreignSymbol
@@ -168,7 +169,7 @@ interface OpenSocket {
 export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrument): CaptureReport {
   const S = instrument.symbol;
   const report: CaptureReport = { refused: null, sockets: [], foreignTradeItems: [], foreignBookRecords: [], fixtureEligible: false };
-  const refuse = (rule: 'R1b' | 'R5' | 'R10', at: number, reason: string): CaptureReport => {
+  const refuse = (rule: 'R1' | 'R1b' | 'R5' | 'R10', at: number, reason: string): CaptureReport => {
     report.refused = { rule, at, reason };
     report.fixtureEligible = false;
     for (const s of report.sockets) s.window = null;
@@ -196,6 +197,11 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
     sock = null;
   };
 
+  // The manifest first (R1, section 5.10 step (1)): the stream begins with manifest_start and ends with manifest_end,
+  // whatever else it holds. A run whose manifest_start is missing writes no normalize report at all (section 5.10).
+  if (records[0]?.type !== 'manifest_start') return refuse('R1', 0, 'the stream does not begin with manifest_start');
+  if (records[records.length - 1]!.type !== 'manifest_end') return refuse('R1', records.length - 1, 'the stream does not end with manifest_end');
+
   for (const [i, r] of records.entries()) {
     if (pending) {
       if (!(r.type === 'ws_close' && r.detail === pending.expect)) return refuse('R10', i, `the settlement that began at record ${pending.first} is not followed directly by ws_close ${pending.expect}`);
@@ -204,10 +210,7 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       pending = null;
       continue;
     }
-    if (i === 0) {
-      if (r.type !== 'manifest_start') return refuse('R10', i, 'the stream does not begin with manifest_start');
-      continue;
-    }
+    if (i === 0) continue;
     // File structure (R1b): a file_end is followed only by the next file's file_start or, in the last file, by
     // manifest_end, and a file_start only follows a file_end, so no record lies outside the bytes a file hash covers.
     const prev = records[i - 1]!.type;
@@ -267,7 +270,10 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
         continue;
       }
       if (p.channel === 'instrument') {
-        const pair = Array.isArray(p.data?.pairs) ? p.data.pairs.find((x: any) => x?.symbol === S) : undefined;
+        const entries = Array.isArray(p.data?.pairs) ? p.data.pairs.filter((x: any) => x?.symbol === S) : [];
+        // An instrument frame lists the selected pair at most once: two entries could disagree (R5, section 8.1).
+        if (entries.length > 1) return refuse('R5', i, `an instrument ${String(p.type)} lists ${S} more than once`);
+        const pair = entries[0];
         if (pair) {
           const spec =
             pair.price_precision === instrument.pricePrecision && pair.qty_precision === instrument.qtyPrecision &&
@@ -360,7 +366,8 @@ export function clockSteps(records: RawRecord[]): number[] {
 
 /**
  * An RFC 3339 date-time as integer microseconds since the epoch (fraction digits beyond the microsecond dropped), or
- * undefined for anything else (section 5.6): upper-case T and Z only, a real calendar date, hour 00-23, minute and
+ * undefined for anything else (section 5.6): upper-case T and Z only, a real calendar date in any year 0000-9999
+ * (proleptic Gregorian), hour 00-23, minute and
  * second 00-59 (a leap second, :60, is no sample: the venue's leap-second convention is unknown), and an offset of Z or
  * +-HH:MM with HH 00-23 and MM 00-59.
  */
@@ -379,7 +386,11 @@ export function rfc3339Micros(text: unknown): bigint | undefined {
     if (oh > 23 || om > 59) return undefined;
     offsetMin = (m[8] === '-' ? -1 : 1) * (oh * 60 + om);
   }
-  const ms = Date.UTC(y, mo - 1, d, h, mi, se) - offsetMin * 60_000;
+  // setUTCFullYear, not Date.UTC, which maps the years 0 to 99 to 1900 to 1999.
+  const t = new Date(0);
+  t.setUTCFullYear(y, mo - 1, d);
+  t.setUTCHours(h, mi, se, 0);
+  const ms = t.getTime() - offsetMin * 60_000;
   return BigInt(ms) * 1000n + BigInt((m[7] ?? '').padEnd(6, '0').slice(0, 6));
 }
 
