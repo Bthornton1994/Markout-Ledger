@@ -41,12 +41,22 @@ export interface SocketReport {
 }
 
 export interface CaptureReport {
-  /** A capture-level refusal (R5 or R10) with the stream index that revealed it, or null. */
-  refused: { rule: 'R5' | 'R10'; at: number; reason: string } | null;
+  /**
+   * A capture-level refusal (R1b, R5 or R10) with the stream index at which the checker found it, or null. The
+   * normalize report names R5 by rule and field only (its at is null, section 5.10); R1b and R10 name this record.
+   */
+  refused: { rule: 'R1b' | 'R5' | 'R10'; at: number; reason: string } | null;
   sockets: SocketReport[];
-  /** Trade items whose symbol is not the selected instrument's: never emitted (dropped.foreignSymbol, R4). */
+  /**
+   * Trade items of another pair in trade update frames on sockets R9 does not refuse: each is dropped.foreignSymbol
+   * (R4) and never emitted. (Section 5.5's precedence counts such an item in a snapshot frame as tradeSnapshotHistory,
+   * and on an R9 socket as socketNotSubscribed, so those are not listed.)
+   */
   foreignTradeItems: { at: number; item: number }[];
-  /** Book messages whose symbol is not the selected instrument's: each cuts the segment (R6, malformed_depth). */
+  /**
+   * Book messages of another pair inside a qualifying socket's window: each is malformed and cuts the segment open at
+   * it (R6, malformed_depth), or is no cut when no segment is open there (section 5.8).
+   */
   foreignBookRecords: number[];
   /** True when at least one socket qualifies and no capture-level rule refused the capture. */
   fixtureEligible: boolean;
@@ -112,25 +122,44 @@ const sameDecimal = (a: unknown, b: string): boolean => {
   }
 };
 
-/** The exact requests of section 8.1 for the selected symbol, by kind, up to their req_id. */
-function requestKind(request: Record<string, any>, symbol: string): string | undefined {
-  const { req_id: _reqId, ...rest } = request;
-  const templates: Record<string, unknown> = {
-    'subscribe:book': { method: 'subscribe', params: { channel: 'book', symbol: [symbol], depth: 100, snapshot: true } },
-    'subscribe:trade': { method: 'subscribe', params: { channel: 'trade', symbol: [symbol], snapshot: false } },
-    'subscribe:instrument': { method: 'subscribe', params: { channel: 'instrument', snapshot: true } },
-    'unsubscribe:book': { method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: 100 } },
-    ping: { method: 'ping' },
-  };
-  const canon = (v: unknown): string => JSON.stringify(v, (_k, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort()) : x));
-  return Object.keys(templates).find((k) => canon(templates[k]) === canon(rest));
+/** The text of each request of section 8.1 for the selected symbol, with <n> for its req_id, by kind. */
+function requestTemplates(symbol: string): [string, string][] {
+  const sym = JSON.stringify([symbol]);
+  return [
+    ['subscribe:book', `{"method":"subscribe","params":{"channel":"book","symbol":${sym},"depth":100,"snapshot":true},"req_id":<n>}`],
+    ['subscribe:trade', `{"method":"subscribe","params":{"channel":"trade","symbol":${sym},"snapshot":false},"req_id":<n>}`],
+    ['subscribe:instrument', '{"method":"subscribe","params":{"channel":"instrument","snapshot":true},"req_id":<n>}'],
+    ['unsubscribe:book', `{"method":"unsubscribe","params":{"channel":"book","symbol":${sym},"depth":100},"req_id":<n>}`],
+    ['ping', '{"method":"ping","req_id":<n>}'],
+  ];
 }
+
+/**
+ * The kind and req_id of a request whose text is, byte for byte, its section 8.1 row for the selected symbol with <n>
+ * replaced by a decimal req_id (no sign, no leading zero, a safe integer), or undefined for any other text.
+ */
+function requestKind(text: unknown, symbol: string): { kind: string; reqId: number } | undefined {
+  if (typeof text !== 'string') return undefined;
+  for (const [kind, template] of requestTemplates(symbol)) {
+    const [before, after] = template.split('<n>') as [string, string];
+    if (!text.startsWith(before) || !text.endsWith(after)) continue;
+    const digits = text.slice(before.length, text.length - after.length);
+    if (!/^(0|[1-9][0-9]*)$/.test(digits)) continue;
+    const reqId = Number(digits);
+    if (Number.isSafeInteger(reqId)) return { kind, reqId };
+  }
+  return undefined;
+}
+
+/** The method that answers a request of each method (section 8.1, Subscription identity). */
+const ANSWER: Record<string, string> = { subscribe: 'subscribe', unsubscribe: 'unsubscribe', ping: 'pong' };
 
 interface OpenSocket {
   open: number;
-  requests: Map<number, { kind: string; at: number }>;
+  /** req_id -> the request's kind, and whether a response has answered it. */
+  requests: Map<number, { kind: string; answered: boolean }>;
   initial: Map<string, number>; // the socket's first subscribe of each channel -> its req_id
-  acked: Map<string, number>; // channel -> stream index of the identity-matching success ack of its initial subscribe
+  acked: Map<string, number>; // channel -> stream index of the success acknowledgement of its initial subscribe
   instrumentAt: number | null;
   instrumentSeen: boolean;
   refused: string | null;
@@ -139,16 +168,22 @@ interface OpenSocket {
 export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrument): CaptureReport {
   const S = instrument.symbol;
   const report: CaptureReport = { refused: null, sockets: [], foreignTradeItems: [], foreignBookRecords: [], fixtureEligible: false };
-  const refuse = (rule: 'R5' | 'R10', at: number, reason: string): CaptureReport => {
+  const refuse = (rule: 'R1b' | 'R5' | 'R10', at: number, reason: string): CaptureReport => {
     report.refused = { rule, at, reason };
     report.fixtureEligible = false;
     for (const s of report.sockets) s.window = null;
+    report.foreignTradeItems = [];
+    report.foreignBookRecords = [];
     return report;
   };
   let sock: OpenSocket | null = null;
   let pending: { first: number; expect: string; detail: string } | null = null;
   let ended = false;
   let lastReqId = -Infinity;
+  /** Whether the capture's first instrument snapshot, which fixes the capture-start specification, has arrived. */
+  let specSeen = false;
+  const tradeCandidates: { at: number; item: number; socket: number }[] = [];
+  const bookCandidates: { at: number; socket: number }[] = [];
 
   const settle = (first: number, terminal: number, detail: string): void => {
     const s = sock!;
@@ -173,8 +208,14 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       if (r.type !== 'manifest_start') return refuse('R10', i, 'the stream does not begin with manifest_start');
       continue;
     }
+    // File structure (R1b): a file_end is followed only by the next file's file_start or, in the last file, by
+    // manifest_end, and a file_start only follows a file_end, so no record lies outside the bytes a file hash covers.
+    const prev = records[i - 1]!.type;
+    if (prev === 'file_end' && r.type !== 'file_start' && r.type !== 'manifest_end') return refuse('R1b', i, `a ${r.type} record after a file_end, outside every file hash`);
+    if (r.type === 'file_start' && prev !== 'file_end') return refuse('R1b', i, 'a file_start that does not follow a file_end');
     if (r.type === 'manifest_end') {
       if (sock) return refuse('R10', i, 'the last socket has no terminal record');
+      if (prev !== 'file_end') return refuse('R10', i, 'a manifest_end that does not follow the last file_end');
       if (i !== records.length - 1) return refuse('R10', i, 'records follow manifest_end');
       break;
     }
@@ -185,18 +226,17 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
     if (FREE.has(r.type)) continue;
     if (REQUESTS.has(r.type)) {
       if (!sock) return refuse('R10', i, `a ${r.type} record outside an open socket`);
-      const req = parsePayload(r.request);
-      const reqId = req?.req_id;
-      if (!Number.isSafeInteger(reqId) || (reqId as number) <= lastReqId) return refuse('R10', i, 'a request whose req_id does not exceed every earlier req_id of the capture');
-      lastReqId = reqId as number;
-      const kind = req ? requestKind(req, S) : undefined;
-      if (kind === undefined || kind.split(':')[0] !== (r.type === 'ping' ? 'ping' : r.type)) {
-        sock.refused ??= `a ${r.type} request that is not the section 8.1 request for ${S}`;
+      const request = requestKind(r.request, S);
+      if (request === undefined || request.kind.split(':')[0] !== r.type) {
+        // Not its row's exact text (a missing or malformed req_id included): the socket is refused (R9).
+        sock.refused ??= `a ${r.type} request whose text is not its section 8.1 row for ${S}`;
         continue;
       }
-      sock.requests.set(reqId as number, { kind, at: i });
-      const channel = kind.split(':')[1];
-      if (kind.startsWith('subscribe:') && channel && !sock.initial.has(channel)) sock.initial.set(channel, reqId as number);
+      if (request.reqId <= lastReqId) return refuse('R10', i, 'a request whose req_id does not exceed every earlier req_id of the capture');
+      lastReqId = request.reqId;
+      sock.requests.set(request.reqId, { kind: request.kind, answered: false });
+      const channel = request.kind.split(':')[1];
+      if (request.kind.startsWith('subscribe:') && channel && !sock.initial.has(channel)) sock.initial.set(channel, request.reqId);
       continue;
     }
     if (r.type === 'message') {
@@ -205,18 +245,24 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       // stream label.
       const p = parsePayload(r.payload);
       if (!p) continue;
-      if (p.channel === undefined && (p.method === 'subscribe' || p.method === 'unsubscribe')) {
+      if (p.channel === undefined && typeof p.method === 'string') {
         const req = sock.requests.get(p.req_id);
-        if (!req) continue;
-        const [method, channel = ''] = req.kind.split(':');
+        if (!req) continue; // answers no request of this socket, so counts for nothing
+        const [method, channel = ''] = req.kind.split(':') as [string, string?];
+        if (req.answered) {
+          // A second response to an answered request; whether the venue ever sends one is unknown, so fail closed.
+          sock.refused ??= `a second response to req_id ${p.req_id}`;
+          continue;
+        }
+        req.answered = true;
         const result = (typeof p.result === 'object' && p.result !== null ? p.result : {}) as Record<string, unknown>;
         const mismatch =
-          p.method !== method ||
+          p.method !== ANSWER[method] ||
           (result.channel !== undefined && result.channel !== channel) ||
-          (channel !== 'instrument' && result.symbol !== undefined && result.symbol !== S) ||
+          ((channel === 'book' || channel === 'trade') && result.symbol !== undefined && result.symbol !== S) ||
           (channel === 'book' && result.depth !== undefined && result.depth !== 100);
-        if (mismatch) sock.refused ??= `an acknowledgement of req_id ${p.req_id} names another subscription than its request`;
-        else if (p.success === true && req.kind.startsWith('subscribe:') && sock.initial.get(channel) === p.req_id) sock.acked.set(channel, i);
+        if (mismatch) sock.refused ??= `a response to req_id ${p.req_id} that names another method or subscription than its request`;
+        else if (p.success === true && method === 'subscribe' && sock.initial.get(channel) === p.req_id) sock.acked.set(channel, i);
         continue;
       }
       if (p.channel === 'instrument') {
@@ -228,25 +274,27 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
           if (!spec) return refuse('R5', i, `an instrument ${String(p.type)} gives ${S} another precision or increment than the capture-start specification`);
         }
         if (p.type === 'snapshot') {
-          if (sock.instrumentAt !== null || sock.instrumentSeen) {
+          if (sock.instrumentSeen) {
             // A socket's instrument subscription yields one snapshot; a later one must still carry the pair.
             if (!pair) return refuse('R5', i, `a later instrument snapshot has no entry for ${S}`);
             continue;
           }
           sock.instrumentSeen = true;
-          // The capture's first socket fixes the capture-start specification: a missing pair or a status other than
-          // online there refuses the capture (R5); on a reconnection it refuses that socket (R9).
-          const first = report.sockets.length === 0;
+          // The capture's first instrument snapshot completes the capture-start specification: a missing pair or a
+          // status other than online there refuses the capture (R5); any other socket's first snapshot refuses only
+          // that socket (R9).
           const problem = !pair ? `the instrument snapshot has no entry for ${S}` : pair.status !== 'online' ? `the instrument snapshot gives ${S} status ${String(pair.status)}` : null;
-          if (problem !== null && first) return refuse('R5', i, `${problem}, on the capture's first socket`);
+          if (problem !== null && !specSeen) return refuse('R5', i, `${problem}, in the capture's first instrument snapshot`);
+          specSeen = true;
           if (problem !== null) sock.refused ??= problem;
           else sock.instrumentAt = i;
         }
         continue;
       }
       if ((p.channel === 'trade' || p.channel === 'book') && Array.isArray(p.data)) {
-        if (p.channel === 'trade') p.data.forEach((item: any, k: number) => item?.symbol !== S && report.foreignTradeItems.push({ at: i, item: k }));
-        else if (p.data.some((item: any) => item?.symbol !== S)) report.foreignBookRecords.push(i);
+        const socket = report.sockets.length;
+        if (p.channel === 'trade' && p.type === 'update') p.data.forEach((item: any, k: number) => item?.symbol !== S && tradeCandidates.push({ at: i, item: k, socket }));
+        else if (p.channel === 'book' && p.data.some((item: any) => item?.symbol !== S)) bookCandidates.push({ at: i, socket });
       }
       continue;
     }
@@ -283,6 +331,10 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
   }
   if (pending) return refuse('R10', records.length - 1, 'the stream ends inside a two-record settlement');
   if (sock) return refuse('R10', records.length - 1, 'the last socket has no terminal record');
+  if (!specSeen) return refuse('R5', records.length - 1, 'the capture has no instrument snapshot, so the instrument channel gives no specification');
+  const qualifying = (k: number): boolean => report.sockets[k]?.refused === null;
+  report.foreignTradeItems = tradeCandidates.filter((c) => qualifying(c.socket)).map(({ at, item }) => ({ at, item }));
+  report.foreignBookRecords = bookCandidates.filter((c) => { const w = report.sockets[c.socket]?.window; return w != null && c.at >= w[0] && c.at <= w[1]; }).map((c) => c.at);
   report.fixtureEligible = report.sockets.some((s) => s.window !== null);
   return report;
 }
@@ -304,29 +356,50 @@ export function clockSteps(records: RawRecord[]): number[] {
   return steps;
 }
 
+/** An RFC 3339 instant as integer microseconds since the epoch (digits beyond the microsecond dropped), or undefined. */
+export function rfc3339Micros(text: unknown): bigint | undefined {
+  if (typeof text !== 'string') return undefined;
+  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(text);
+  if (!m) return undefined;
+  const ms = Date.parse(`${m[1]}${m[3]}`);
+  if (!Number.isFinite(ms)) return undefined;
+  return BigInt(ms) * 1000n + BigInt((m[2] ?? '').padEnd(6, '0').slice(0, 6));
+}
+
+/** The unixtime of a usable REST Time probe (its payload's error array is empty and result.unixtime is an integer). */
+function probeUnixtime(r: RawRecord): number | undefined {
+  const p = parsePayload(r.payload);
+  const t = p?.result?.unixtime;
+  return Array.isArray(p?.error) && p.error.length === 0 && Number.isSafeInteger(t) ? t : undefined;
+}
+
 export interface OwnedSamples {
   /** Stream index of the first record of the segment's clock epoch: the later of 0 and the last clock step at or before its start. */
   epoch: number;
-  /** Stream indices of the millisecond samples (method responses with time_in and time_out) the segment owns. */
+  /** Stream indices of the usable millisecond samples the segment owns (responses that answer its requests), each with its request's index. */
   ws: number[];
-  /** Stream indices of the REST probes the segment owns. */
+  /** Stream indices of the usable REST probes the segment owns. */
   rest: number[];
   source: 'ws_method_response' | 'rest_time' | 'none';
+  /** For each entry of ws, the stream index of the request it answers. */
+  wsRequests: number[];
 }
 
 /** The REST probe window: probes received at most this long before the segment's first record, by the monotonic clock. */
 export const PROBE_LOOKBACK_NS = 900_000_000_000n;
 
 /**
- * The clock samples a segment owns (section 5.6). Its clock epoch starts at the last clock step at or before its first
- * record (record 0 when there is none); a segment never contains a later step, since a step cuts it (R3). It owns:
- * the method responses carrying time_in and time_out whose request record and response record both lie on the
- * segment's own socket, at or after the later of that socket's ws_open and the epoch start, and at or before the
- * segment's end record (so the three acknowledgements of the socket's subscriptions, which always precede its gate,
- * count for every segment of that socket in the same epoch); and the REST probes whose record lies in the epoch at or
- * before the end record, whose send clock, after a step, is not before the step's record, and which were received no
- * more than 15 minutes before the segment's first record. Three or more millisecond samples give source
- * ws_method_response; otherwise one or more probes give rest_time; otherwise none (R2b refuses the segment).
+ * The clock samples a segment owns (section 5.6). `start` is the segment's first record as section 5.10 defines it (the
+ * record of its first event). Its clock epoch starts at the last clock step at or before `start` (record 0 when there
+ * is none); a segment never contains a later step, since a step cuts it (R3). It owns: every usable method response
+ * (both time_in and time_out RFC 3339 instants) that is the first response to a request of the segment's own socket
+ * and has the method that answers it, with the request record and the response record both at or after the later of
+ * that socket's ws_open and the epoch start and at or before the segment's end record (so the three acknowledgements
+ * of the socket's subscriptions, which always precede its gate, count for every segment of that socket in the same
+ * epoch); and every usable REST probe (an empty error array and an integer result.unixtime) whose record lies in the
+ * epoch at or before the end record, whose send clock, after a step, is not before the step's record, and which was
+ * received no more than 15 minutes before `start`. Three or more millisecond samples give source ws_method_response;
+ * otherwise one or more probes give rest_time; otherwise none (R2b refuses the segment).
  */
 export function ownedClockSamples(records: RawRecord[], socket: SocketReport, start: number, end: number): OwnedSamples {
   if (!socket.window || start < socket.window[0] || end > socket.window[1] || start > end) {
@@ -336,22 +409,74 @@ export function ownedClockSamples(records: RawRecord[], socket: SocketReport, st
   if (steps.some((k) => k > start && k <= end)) throw new Error('a segment never spans a clock step (R3 cuts it)');
   const epoch = steps.filter((k) => k <= start).pop() ?? 0;
   const epochMono = BigInt(records[epoch]!.recvMonoNs);
-  const requests = new Set<number>();
+  const requests = new Map<number, { method: string; at: number; answered: boolean }>();
   const ws: number[] = [];
+  const wsRequests: number[] = [];
   for (let i = Math.max(socket.open, epoch); i <= end; i++) {
     const r = records[i]!;
     if (REQUESTS.has(r.type)) {
-      const req = parsePayload(r.request);
-      if (Number.isSafeInteger(req?.req_id)) requests.add(req!.req_id);
+      const parsed = parsePayload(r.request);
+      if (Number.isSafeInteger(parsed?.req_id) && typeof parsed?.method === 'string') requests.set(parsed.req_id, { method: parsed.method, at: i, answered: false });
     } else if (r.type === 'message') {
       const p = parsePayload(r.payload);
-      if (p && p.channel === undefined && typeof p.method === 'string' && requests.has(p.req_id) && typeof p.time_in === 'string' && typeof p.time_out === 'string') ws.push(i);
+      if (!p || p.channel !== undefined || typeof p.method !== 'string') continue;
+      const req = requests.get(p.req_id);
+      if (!req || req.answered) continue;
+      req.answered = true;
+      if (p.method === ANSWER[req.method] && rfc3339Micros(p.time_in) !== undefined && rfc3339Micros(p.time_out) !== undefined) {
+        ws.push(i);
+        wsRequests.push(req.at);
+      }
     }
   }
   const from = BigInt(records[start]!.recvMonoNs) - PROBE_LOOKBACK_NS;
   const rest = records.flatMap((r, i) =>
-    r.type === 'probe' && i >= epoch && i <= end && BigInt(r.recvMonoNs) >= from && (epoch === 0 || (typeof r.sentMonoNs === 'string' && BigInt(r.sentMonoNs) >= epochMono)) ? [i] : [],
+    r.type === 'probe' && i >= epoch && i <= end && BigInt(r.recvMonoNs) >= from && probeUnixtime(r) !== undefined && Number.isSafeInteger(r.sentWallMs) &&
+    (epoch === 0 || (typeof r.sentMonoNs === 'string' && BigInt(r.sentMonoNs) >= epochMono)) ? [i] : [],
   );
   const source = ws.length >= 3 ? 'ws_method_response' : rest.length >= 1 ? 'rest_time' : 'none';
-  return { epoch, ws, rest, source };
+  return { epoch, ws, rest, source, wsRequests };
+}
+
+export interface ClockEstimate {
+  samples: number;
+  /** Integer microseconds divided by 1000, written with exactly three decimals (section 5.6). */
+  medianMs: string;
+  medianRttMs: string;
+  maxAbsMs: string;
+  resolutionMs: 1 | 1000;
+  source: 'ws_method_response' | 'rest_time';
+}
+
+const ms3 = (us: bigint): string => {
+  const abs = us < 0n ? -us : us;
+  return `${us < 0n ? '-' : ''}${abs / 1000n}.${String(abs % 1000n).padStart(3, '0')}`;
+};
+/** The nearest-rank median: the ceil(count / 2)-th smallest value. */
+const median = (values: bigint[]): bigint => [...values].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[Math.ceil(values.length / 2) - 1]!;
+
+/**
+ * The venueClockOffsetMs values of section 5.6 from the samples a segment owns, or null for source none. Every instant
+ * is integer microseconds. A millisecond sample: t0 the request record's recvWallMs * 1000, t1 time_in, t2 time_out,
+ * t3 the response record's recvWallMs * 1000. A REST sample: t0 the probe's sentWallMs * 1000, t3 its recvWallMs *
+ * 1000, and t1 = t2 = unixtime * 1000000 + 500000 (the middle of the whole second the venue reported). Offset
+ * ((t1 - t0) + (t2 - t3)) / 2 and round trip (t3 - t0) - (t2 - t1), the division truncating toward zero.
+ */
+export function clockEstimate(records: RawRecord[], owned: OwnedSamples): ClockEstimate | null {
+  if (owned.source === 'none') return null;
+  const pairs: [bigint, bigint, bigint, bigint][] =
+    owned.source === 'ws_method_response'
+      ? owned.ws.map((i, k) => {
+          const p = parsePayload(records[i]!.payload)!;
+          return [BigInt(records[owned.wsRequests[k]!]!.recvWallMs) * 1000n, rfc3339Micros(p.time_in)!, rfc3339Micros(p.time_out)!, BigInt(records[i]!.recvWallMs) * 1000n];
+        })
+      : owned.rest.map((i) => {
+          const r = records[i]!;
+          const venue = BigInt(probeUnixtime(r)!) * 1000000n + 500000n;
+          return [BigInt(r.sentWallMs as number) * 1000n, venue, venue, BigInt(r.recvWallMs) * 1000n];
+        });
+  const offsets = pairs.map(([t0, t1, t2, t3]) => (t1 - t0 + (t2 - t3)) / 2n);
+  const rtts = pairs.map(([t0, t1, t2, t3]) => t3 - t0 - (t2 - t1));
+  const maxAbs = offsets.reduce((m, o) => (o < 0n ? -o : o) > m ? (o < 0n ? -o : o) : m, 0n);
+  return { samples: pairs.length, medianMs: ms3(median(offsets)), medianRttMs: ms3(median(rtts)), maxAbsMs: ms3(maxAbs), resolutionMs: owned.source === 'rest_time' ? 1000 : 1, source: owned.source };
 }

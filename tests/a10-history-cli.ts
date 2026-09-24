@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 /** Whether `sha` names a commit in this clone. */
 const hasCommit = (sha: string): boolean => {
   try {
-    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { stdio: 'ignore' });
+    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { stdio: 'ignore', env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' } });
     return true;
   } catch {
     return false;

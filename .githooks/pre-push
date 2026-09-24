@@ -20,7 +20,9 @@
 # for example); for a new remote ref, every commit reachable from the pushed commit (the clone's remote-tracking refs
 # are not trusted, since they may be stale). It also refuses a pushed ref that does not point, directly or through an
 # annotated tag, at a commit, since a tag on a tree or a blob carries files no commit scan sees. It needs node_modules
-# (npm ci) and the scan in the checked-out tree, and refuses the push when it cannot run.
+# (npm ci) and the scan in the checked-out tree, and refuses the push when it cannot run, or while the checkout's
+# .githooks/pre-push differs from this copy. Its git commands and the scan ignore replace refs, so they read the objects
+# the push sends.
 #
 # It is a local, bypassable control, not a guarantee and not complete prevention: `git push --no-verify`, a clone where
 # it is not installed, an edited or non-executable hook, another git client and an upload through the GitHub web
@@ -28,6 +30,15 @@
 # several lines, embedded in other text, compressed, encoded or binary). The CI history step (npm run test:history)
 # detects the same things only after a push, and only for a pull request's range or a push to main, and it reads no tag
 # message.
+
+# Every git command below, and the scan's, reads the objects a push sends, never replacements (git replace).
+export GIT_NO_REPLACE_OBJECTS=1
+# An installed copy is frozen when it is copied; when the checkout's own .githooks/pre-push differs from it, the push is
+# refused until the copy is refreshed, so a strengthened hook cannot be left behind.
+if [ -f .githooks/pre-push ] && ! cmp -s "$0" .githooks/pre-push; then
+  echo "A10 pre-push: this hook ($0) differs from the checkout's .githooks/pre-push; copy it again (cp .githooks/pre-push .git/hooks/pre-push) and push again; refusing the push" >&2
+  exit 1
+fi
 tsx="node_modules/.bin/tsx"
 if [ ! -x "$tsx" ]; then
   echo "A10 pre-push: $tsx is missing (run npm ci first); refusing the push" >&2

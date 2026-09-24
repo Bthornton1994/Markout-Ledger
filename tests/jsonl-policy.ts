@@ -38,11 +38,13 @@
 // the version-1 format and labelled synthetic pass kind synthetic_v1); a venue payload pasted into a string value of
 // either fixture kind, or into an open object of a recorded fixture; a recorded value encoded into a normalize report's
 // constrained values (an integer in any integer field, the number of entries in an array, the choice among the
-// enumerated codes a value may take, or bytes hex-encoded into a hash, UUID, commit or version string). Every other
-// tracked text file, and every commit message and annotated tag message the history scan and the hook read, gets only a
-// content check (rawRecordLine): a raw capture record on a line of its own is found under any name, but not one spread
-// over several lines, embedded in other text, encoded, compressed or in a file that is not UTF-8 text. Review remains
-// the control for those.
+// enumerated codes a value may take or between null and a value, bytes hex-encoded into a hash, UUID, commit or
+// version string, whether supersedes is present or empty, and the directory and number of committed reports). Every
+// other tracked text file, and every commit message and header and annotated tag message the history scan and the hook
+// read, gets only a content check (rawRecordLine): a raw capture record on a line of its own is found under any name,
+// but not one spread over several lines, embedded in other text, encoded, compressed or in a file that is not UTF-8
+// text, and no other form of recorded data (a recorded fixture or unwrapped venue frames under another name, a report
+// under a name not ending in .normalize-report.json, exports of recorded values). Review remains the control for those.
 //
 // Two scopes use the same rule: trackedHygieneFiles lists the tree under test (the files tracked at this moment), and
 // historyViolations scans every commit of a commit range, so a file added and deleted again inside the range is still
@@ -264,7 +266,7 @@ const RULE_SHAPES: Record<string, { scope: string; fields: (string | null)[] }> 
   R2: { scope: 'segment', fields: [null] },
   R2b: { scope: 'segment', fields: [null] },
   R4: { scope: 'item', fields: ['pair', 'price', 'size', null] },
-  R5: { scope: 'capture', fields: ['priceDecimals', 'qtyDecimals', 'priceIncrement', 'instrumentSpec', 'pair', 'status'] },
+  R5: { scope: 'capture', fields: ['priceDecimals', 'qtyDecimals', 'priceIncrement', 'qtyIncrement', 'instrumentSpec', 'pair', 'status'] },
   R6: { scope: 'segment', fields: [null] },
   R7: { scope: 'segment', fields: [null] },
   R8: { scope: 'capture', fields: ['rights'] },
@@ -307,8 +309,8 @@ function unsafeNumber(value: unknown): number | undefined {
  * records than the count); rejections strictly ascending by (at, segmentIndex, rule, field); supersedes by
  * segmentIndex; each fixtureFile naming its own capture and segment; each rule with its one scope and its own fields
  * (R3, a cut, is never a rejection); a segment rejection naming the rule its segment names; too_short exactly under R7.
- * Cross-references: every raw record reference inside the listed raw files (at most one past a file's records, its
- * file_end, or two in the last file, its manifest_end); segments in raw order, each start not after its end, without
+ * Cross-references: every raw record reference inside the listed raw files (at most one record past a file's
+ * file_end, the record R1b names when one follows it, or in the last file its manifest_end); segments in raw order, each start not after its end, without
  * overlap; start reasons following the previous segment's end reason; capture_end only on the last segment; exactly
  * one segment rejection for each refused or too_short segment and none for a written one; each cut after the end of
  * the segment it names, with that segment's end reason, and at most one per segment; a rejection's at null exactly for
@@ -358,7 +360,7 @@ function crossReferenceViolation(r: Record<string, any>): string | undefined {
   for (const ref of refs) {
     if (ref === null) continue;
     const file = files[ref.fileIndex];
-    const limit = file === undefined ? -1 : file.records + (ref.fileIndex === files.length - 1 ? 1 : 0);
+    const limit = file === undefined ? -1 : file.records + 1;
     if (ref.record > limit) return `a raw record reference ${ref.fileIndex}:${ref.record} outside the raw files the report lists`;
   }
   const cmp = (a: RecordRef, b: RecordRef): number => compareKeys(refKey(a), refKey(b));
@@ -432,12 +434,18 @@ const NOT_UTF8_REASON = 'bytes that are not UTF-8';
 const MISSING_REASON = 'a tracked path that is missing from the working tree';
 const NOT_FILE_REASON = 'a path that is not a regular file where the rule allows only a regular file';
 
+/**
+ * The environment of every git command the rule runs: replace refs (git replace) are ignored, so the scan reads the
+ * objects a push sends, not replacements the clone substitutes for them.
+ */
+export const GIT_SCAN_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' };
+
 /** Whether git records `path` as a submodule entry (mode 160000) in the index of `root`; a git failure throws. */
 const isGitlink = (root: string, path: string): boolean =>
   execFileSync('git', ['ls-files', '-s', '-z', '--', path], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, GIT_LITERAL_PATHSPECS: '1' },
+    env: { ...GIT_SCAN_ENV, GIT_LITERAL_PATHSPECS: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   }).startsWith('160000 ');
 
@@ -511,7 +519,7 @@ export function trackedHygieneFiles(root: string = repoRootPath): string[] {
   if (existsSync(join(root, '.git'))) {
     let listing: string;
     try {
-      listing = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      listing = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', env: GIT_SCAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
     }
@@ -546,7 +554,7 @@ export function trackedOtherFiles(root: string = repoRootPath): string[] {
   if (existsSync(join(root, '.git'))) {
     let listing: string;
     try {
-      listing = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      listing = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root, encoding: 'utf8', env: GIT_SCAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
     }
@@ -593,7 +601,7 @@ export interface HistoryScan {
 }
 
 const git = (root: string, args: string[]): Buffer =>
-  execFileSync('git', args, { cwd: root, maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] });
+  execFileSync('git', args, { cwd: root, maxBuffer: 1 << 30, env: GIT_SCAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
 
 /** A blob's bytes; a git failure throws, so the scan fails closed. */
 const readBlob = (root: string, sha: string, path: string, commit: string): Buffer => {
@@ -658,8 +666,13 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
     } catch (e) {
       throw new Error(`A10 history cannot read commit ${commit}: ${(e as Error).message}`);
     }
-    const messageLine = rawRecordLine(object.slice(object.indexOf('\n\n') + 2));
+    const blank = object.indexOf('\n\n');
+    const messageLine = blank < 0 ? undefined : rawRecordLine(object.slice(blank + 2));
     if (messageLine !== undefined) violations.push({ commit, path: '(commit message)', reason: `line ${messageLine} of the commit message is a raw capture record` });
+    // The header too: merging a signed tag copies the tag, its message included, into a mergetag header whose
+    // continuation lines start with a space (rawRecordLine trims them).
+    const headerLine = rawRecordLine(blank < 0 ? object : object.slice(0, blank));
+    if (headerLine !== undefined) violations.push({ commit, path: '(commit header)', reason: `line ${headerLine} of the commit header (a mergetag, for example) is a raw capture record` });
     const entries = git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]).toString('utf8').split('\0').filter((e) => e.length > 0);
     for (const entry of entries) {
       const tab = entry.indexOf('\t');

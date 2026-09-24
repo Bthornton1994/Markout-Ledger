@@ -292,6 +292,30 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     ]);
   });
 
+  it('ignores replace refs, reading the objects a push sends: a raw commit hidden behind git replace is found', () => {
+    const root = newRepo({ 'README.md': 'x' });
+    const base = commitAll(root, 'base');
+    gitIn(root, 'checkout', '-q', '-b', 'side');
+    const clean = commitAll(root, 'clean');
+    gitIn(root, 'checkout', '-q', 'main');
+    writeFileSync(join(root, 'data.jsonl'), raw);
+    const bad = commitAll(root, 'a raw capture');
+    gitIn(root, 'replace', bad, clean);
+    expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit: bad, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }]);
+  });
+
+  it('reads the commit header as well as the message: a raw record in a mergetag header is found', () => {
+    const root = newRepo({ 'README.md': 'x' });
+    const base = commitAll(root, 'base');
+    const tree = gitIn(root, 'rev-parse', 'HEAD^{tree}').trim();
+    const record = JSON.stringify(captureExamples.message_trade);
+    const header = [`tree ${tree}`, `parent ${base}`, 'author a <a@example.invalid> 1791288000 +0000', 'committer a <a@example.invalid> 1791288000 +0000',
+      `mergetag object ${base}`, ' type commit', ' tag signed', ' tagger a <a@example.invalid> 1791288000 +0000', ' ', ` ${record}`].join('\n');
+    const commit = execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: root, input: `${header}\n\nmerge side\n`, encoding: 'utf8', env: GIT_ENV }).trim();
+    gitIn(root, 'update-ref', 'refs/heads/main', commit);
+    expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit, path: '(commit header)', reason: 'line 10 of the commit header (a mergetag, for example) is a raw capture record' }]);
+  });
+
   it('reads the message of an annotated tag, and of a tag it points to, with the same content check', () => {
     const root = newRepo({ 'README.md': 'x' });
     commitAll(root, 'base');
@@ -636,6 +660,33 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     expect(remoteRef(c.remote, 'refs/notes/commits')).toBeUndefined();
   });
 
+  it('refuses the push while an installed copy differs from the checkout\'s .githooks/pre-push, so a strengthened hook is not left behind', () => {
+    const c = hookClone();
+    c.hookGit('config', '--unset', 'core.hooksPath');
+    writeFileSync(join(c.root, '.git', 'hooks', 'pre-push'), read('.githooks/pre-push').replace('#!/bin/sh\n', '#!/bin/sh\n# an older copy\n'), { mode: 0o755 });
+    expect(c.push('origin', 'main')).toMatch(/A10 pre-push: this hook \(.*\) differs from the checkout's \.githooks\/pre-push/);
+    expect(remoteRef(c.remote, 'main')).toBeUndefined();
+    copyFileSync(join(c.root, '.githooks', 'pre-push'), join(c.root, '.git', 'hooks', 'pre-push'));
+    expect(c.push('origin', 'main')).toBe('');
+  });
+
+  it('reads the objects the push sends, not replacements: a raw commit hidden behind git replace is still refused', () => {
+    const c = hookClone();
+    expect(c.push('origin', 'main')).toBe('');
+    // A clean sibling commit on another branch, then the raw commit on main, replaced locally by the clean one.
+    c.hookGit('checkout', '-q', '-b', 'side');
+    c.hookGit('commit', '-q', '--allow-empty', '-m', 'clean');
+    const clean = c.hookGit('rev-parse', 'HEAD').trim();
+    c.hookGit('checkout', '-q', 'main');
+    writeFileSync(join(c.root, 'data.jsonl'), raw);
+    c.hookGit('add', '-A');
+    c.hookGit('commit', '-q', '-m', 'a raw capture');
+    const bad = c.hookGit('rev-parse', 'HEAD').trim();
+    c.hookGit('replace', bad, clean);
+    expect(c.push('origin', 'main')).toMatch(/"data\.jsonl": non-blank line 1 is a raw capture record/);
+    expect(remoteRef(c.remote, 'main')).not.toBe(bad);
+  });
+
   it('refuses the push when it cannot run (no node_modules), rather than letting it through', () => {
     const c = hookClone(false);
     expect(c.push('origin', 'main')).toMatch(/A10 pre-push: node_modules\/\.bin\/tsx is missing/);
@@ -708,7 +759,7 @@ describe('A10 classifier', () => {
   it.each<[string, (r: Json) => void, RegExp]>([
     ['a count too large to be a safe integer', (r) => (r.options.windowMs = 6.27104e25), /not a safe integer/],
     ['a record reference beyond the raw files it lists', (r) => (r.cuts[1].at = { fileIndex: 7, record: 1 }), /7:1 outside the raw files the report lists/],
-    ['a record reference beyond a file\'s file_end', (r) => (r.dropped.depthBeforeSnapshot.records[1].record = 120001), /0:120001 outside the raw files/],
+    ['a record reference more than one record past a file\'s file_end', (r) => (r.dropped.depthBeforeSnapshot.records[1].record = 120002), /0:120002 outside the raw files/],
     ['a segment that starts after its end', (r) => (r.segments[1].start = { fileIndex: 1, record: 41300 }), /segment 1 starts after its end/],
     ['overlapping segments', (r) => (r.segments[1].start = { fileIndex: 1, record: 40000 }), /segment 1 does not start after segment 0 ends/],
     ['a start reason that does not follow the previous end reason', (r) => (r.segments[1].startReason = 'resync_after_clock_cut'), /segment 1 starts with resync_after_clock_cut, not resync_after_gap/],
@@ -743,6 +794,12 @@ describe('A10 classifier', () => {
       r.rejections.push({ rule: 'R4', scope: 'item', segmentIndex: null, at: { fileIndex: 1, record: 41210 }, field: 'pair' });
     });
     expect(classifyNormalizeReport(outside)).toEqual({ ok: true, kind: 'normalize_report_v1' });
+  });
+
+  it('accepts an R5 refusal naming qtyIncrement, the field of a changed quantity increment', () => {
+    const r = structuredClone(reportExamples.report_r1_unsupported_version!);
+    r.rejections = [{ rule: 'R5', scope: 'capture', segmentIndex: null, at: null, field: 'qtyIncrement' }];
+    expect(classifyNormalizeReport(canonicalReport(r))).toEqual({ ok: true, kind: 'normalize_report_v1' });
   });
 
   it('requires a tracked report to be named for the capture it carries', () => {

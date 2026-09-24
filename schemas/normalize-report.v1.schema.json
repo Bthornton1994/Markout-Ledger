@@ -165,7 +165,7 @@
         "segmentIndex": { "oneOf": [{ "$ref": "#/$defs/count" }, { "type": "null" }] },
         "at": { "oneOf": [{ "$ref": "#/$defs/recordRef" }, { "type": "null" }] },
         "field": {
-          "enum": ["manifestEnd", "captureFormatVersion", "capturer", "recvWallMs", "recvMonoNs", "price", "size", "priceDecimals", "qtyDecimals", "priceIncrement", "instrumentSpec", "pair", "status", "rights", null],
+          "enum": ["manifestEnd", "captureFormatVersion", "capturer", "recvWallMs", "recvMonoNs", "price", "size", "priceDecimals", "qtyDecimals", "priceIncrement", "qtyIncrement", "instrumentSpec", "pair", "status", "rights", null],
           "description": "the name of the field a rule names (R1, R4, R5, R8), from this fixed list, never its value; null when the rule names none (a missing or unreadable manifest_start yields no report, contract section 5.10)"
         }
       }
