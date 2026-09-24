@@ -26,7 +26,7 @@
       "startedAtIso": "2026-10-06T12:00:00.000Z"
     },
     "file_start": { "type": "file_start", "recvWallMs": 1791291600000, "recvMonoNs": "8600000000000", "fileIndex": 1, "previousFileSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-    "ws_open": { "type": "ws_open", "recvWallMs": 1791288000050, "recvMonoNs": "5000050000000", "detail": "connected wss://ws.kraken.com/v2" },
+    "ws_open": { "type": "ws_open", "recvWallMs": 1791288000050, "recvMonoNs": "5000050000000", "detail": "open" },
     "ws_close": { "type": "ws_close", "recvWallMs": 1791288900000, "recvMonoNs": "5900000000000", "detail": "liveness_timeout" },
     "ws_error": { "type": "ws_error", "recvWallMs": 1791288900010, "recvMonoNs": "5900010000000", "detail": "reconnect_budget_exhausted" },
     "subscribe": { "type": "subscribe", "recvWallMs": 1791288000100, "recvMonoNs": "5000100000000", "request": "{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":[\"BTC/USD\"],\"depth\":100,\"snapshot\":true},\"req_id\":1}" },

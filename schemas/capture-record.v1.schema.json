@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/capture-record.v1.schema.json",
   "title": "Markout Ledger raw capture record (capture format v1)",
-  "description": "One JSONL line of a first-party market-data capture. Every record carries the capture host's realtime clock in integer milliseconds (recvWallMs, from Date.now()) and its monotonic clock in nanoseconds (recvMonoNs, from process.hrtime.bigint(), as a decimal string), both taken at receipt before parsing (at send time for subscribe/unsubscribe/ping records). Payloads are verbatim. Records accept properties they do not declare (additive fields; contract section 6), except manifest_start.host, which is closed so that the host block carries only os and runtime, never the capture host's hostname or address (contract section 4.1). Venue-agnostic; see docs/M2_DATA_CONTRACT.md section 4.",
+  "description": "One JSONL line of a first-party market-data capture. Every record carries the capture host's realtime clock in integer milliseconds (recvWallMs, from Date.now()) and its monotonic clock in nanoseconds (recvMonoNs, from process.hrtime.bigint(), as a decimal string), both read afresh for each record: a message record's by its frame handler at receipt before parsing, a probe record's at receipt of the REST response, a subscribe/unsubscribe/ping record's at send time, and every other record's (ws_open, ws_close, ws_error, note, file_start, file_end, manifest_start, manifest_end) when that record is written, never a timer's deadline; a monotonic reading that does not exceed the previous record's recvMonoNs is taken again until it does (contract section 4). Payloads are verbatim. The detail of ws_open, ws_close and ws_error takes only the values of the lifecycle table of contract section 8.1; a note's detail is free text. Records accept properties they do not declare (additive fields; contract section 6), except manifest_start.host, which is closed so that the host block carries only os and runtime, never the capture host's hostname or address (contract section 4.1). Venue-agnostic; see docs/M2_DATA_CONTRACT.md section 4.",
   "type": "object",
   "required": ["type", "recvWallMs", "recvMonoNs"],
   "properties": {
@@ -38,8 +38,30 @@
       "then": { "type": "object", "required": ["fileIndex", "previousFileSha256"], "properties": { "fileIndex": { "type": "integer", "minimum": 1 }, "previousFileSha256": { "$ref": "#/$defs/sha256" } } }
     },
     {
-      "if": { "properties": { "type": { "enum": ["ws_open", "ws_close", "ws_error", "note"] } }, "required": ["type"] },
-      "then": { "type": "object", "required": ["detail"], "properties": { "detail": { "type": "string" } } }
+      "if": { "properties": { "type": { "const": "note" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["detail"], "properties": { "detail": { "type": "string", "description": "operator or tool note (clock step detected, checksum mismatch, crossed book, malformed update, resubscribe issued); no book-frame check runs, and so no checksum-mismatch, crossed-book, malformed-update or resubscribe note is written, while a resync is outstanding; clock-step notes are still written (docs/M2_DATA_CONTRACT.md section 8.1)" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ws_open" } }, "required": ["type"] },
+      "then": { "type": "object", "required": ["detail"], "properties": { "detail": { "const": "open" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ws_error" } }, "required": ["type"] },
+      "then": {
+        "type": "object",
+        "required": ["detail"],
+        "properties": { "detail": { "enum": ["connect_failed", "connect_timeout", "network_error", "subscribe_rejected", "resync_budget_exhausted", "reconnect_budget_exhausted", "capture_end", "operator_stop"] } },
+        "description": "the lifecycle table of contract section 8.1 fixes every value"
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ws_close" } }, "required": ["type"] },
+      "then": {
+        "type": "object",
+        "required": ["detail"],
+        "properties": { "detail": { "type": "string", "pattern": "^(resync_failed|snapshot_timeout|subscribe_ack_timeout|instrument_snapshot_timeout|liveness_timeout|network_error|subscribe_rejected|budget_exhausted|capture_end|operator_stop|remote_close:[1-4][0-9]{3}|connection_lost:[1-4][0-9]{3})$" } },
+        "description": "the lifecycle table of contract section 8.1 fixes every value; remote_close and connection_lost carry the close code the runtime reported (connection_lost when the close was not clean, 1006 included)"
+      }
     },
     {
       "if": { "properties": { "type": { "enum": ["subscribe", "unsubscribe", "ping"] } }, "required": ["type"] },

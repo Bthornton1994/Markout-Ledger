@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:schemas": "vitest run tests/schemas.test.ts",
+    "test:history": "tsx tests/a10-history-cli.ts",
     "replay": "tsx src/cli/main.ts replay",
     "fixtures": "tsx src/cli/main.ts generate-fixtures",
     "demo": "tsx src/cli/main.ts replay --scenario baseline --out out && tsx src/cli/main.ts replay --scenario riskgate --out out",

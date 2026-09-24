@@ -1,0 +1,50 @@
+#!/bin/sh
+# A10 pre-push check (docs/M2_DATA_CONTRACT.md section 6.5). Opt in once per clone, from the repository root:
+#
+#   git config core.hooksPath .githooks
+#
+# Before git sends anything, it runs the repository rule of tests/jsonl-policy.ts over the commits of each pushed ref
+# and refuses the push if any of them carries a file the rule rejects (a raw capture record, any file under captures/
+# or normalized/, a normalize report outside its closed schema, canonical bytes, order or pairings, an unclassified
+# .jsonl file), including a file that was added and deleted again before the push. For a ref the remote already has, it
+# scans the commits between the remote's value and the pushed commit, or every commit reachable from the pushed commit
+# when the remote's value is not in this clone (after a history rewrite, for example); for a new remote ref, every commit
+# reachable from the pushed commit (the clone's remote-tracking refs are not trusted, since they may be stale). It also
+# refuses a pushed ref that does not point, directly or through an annotated tag, at a commit, since a tag on a tree or
+# a blob carries files no commit scan sees. It needs node_modules (npm ci) and refuses the push when it cannot run.
+#
+# It is a local, bypassable control, not a guarantee: `git push --no-verify`, a clone where core.hooksPath is not set, an
+# edited or non-executable hook, another git client, and an upload through the GitHub web interface all skip it, and it
+# covers only the names the rule covers. The CI history step (npm run test:history) detects the same files only after a
+# push, and only for a pull request's range or a push to main.
+tsx="node_modules/.bin/tsx"
+if [ ! -x "$tsx" ]; then
+  echo "A10 pre-push: $tsx is missing (run npm ci first); refusing the push" >&2
+  exit 1
+fi
+status=0
+refused=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+  if ! git rev-parse -q --verify "$local_sha^{commit}" >/dev/null; then
+    echo "A10 pre-push: $local_ref does not point at a commit (directly or through an annotated tag); refusing the push" >&2
+    status=1
+    refused="$refused $local_ref"
+    continue
+  fi
+  case "$remote_sha" in
+    *[!0]*)
+      if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        echo "A10 pre-push: the remote's $remote_ref ($remote_sha) is not in this clone; scanning every commit reachable from $local_sha" >&2
+        remote_sha=0
+      fi ;;
+  esac
+  case "$remote_sha" in
+    *[!0]*) "$tsx" tests/a10-history-cli.ts --revs "$remote_sha..$local_sha" </dev/null || { status=1; refused="$refused $local_ref"; } ;;
+    *) "$tsx" tests/a10-history-cli.ts --revs "$local_sha" </dev/null || { status=1; refused="$refused $local_ref"; } ;;
+  esac
+done
+if [ "$status" -ne 0 ]; then
+  echo "A10 pre-push: refusing the push of$refused; see the lines above" >&2
+fi
+exit $status
