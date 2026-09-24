@@ -56,7 +56,7 @@
       "type": "object",
       "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "integrity", "visibleSpanBps", "tradeIdJumps", "venueStatus", "dropped", "cuts"],
       "properties": {
-        "captureId": { "type": "string", "format": "uuid" },
+        "captureId": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "a lower-case UUID version 4 (contract section 3)" },
         "captureFormatVersion": { "const": 1 },
         "rawFiles": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
         "segmentIndex": { "type": "integer", "minimum": 0 },

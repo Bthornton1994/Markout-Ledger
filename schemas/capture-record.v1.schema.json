@@ -20,7 +20,7 @@
         "required": ["captureFormatVersion", "captureId", "venue", "instrument", "streams", "endpoints", "capturer", "host", "clock", "instrumentSpec", "startedAtIso"],
         "properties": {
           "captureFormatVersion": { "const": 1 },
-          "captureId": { "type": "string", "format": "uuid" },
+          "captureId": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "a lower-case UUID version 4 (contract section 3)" },
           "venue": { "type": "string" },
           "instrument": { "type": "string", "description": "venue-native symbol, e.g. BTC/USD" },
           "streams": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "the subscription requests, verbatim" },

@@ -6,7 +6,7 @@
 // case shows only that the rights block has the required shape. It establishes no permission; the owner verifies the
 // attested clearance by hand before any recorded fixture is committed (decision condition C2).
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -14,12 +14,16 @@ import {
   canonicalReport,
   classifyJsonl,
   classifyNormalizeReport,
+  classifyOtherFile,
+  classifyOtherPath,
   classifyRepoPath,
   classifyTrackedFile,
   historyViolations,
   readRepoFile,
+  tagMessageViolations,
   repoRootPath,
   trackedHygieneFiles,
+  trackedOtherFiles,
 } from './jsonl-policy.js';
 
 type Json = Record<string, any>;
@@ -42,6 +46,8 @@ function withTrade(change: (trade: Json) => void): string {
 const fixtureExamples = readJson('schemas/examples/fixture.v2.examples.json').examples as Record<string, Json>;
 const captureExamples = readJson('schemas/examples/capture-record.v1.examples.json').examples as Record<string, Json>;
 const reportExamples = readJson('schemas/examples/normalize-report.v1.examples.json').examples as Record<string, Json>;
+/** The only name a tracked report of the example capture may have (contract section 6.5). */
+const REPORT_NAME = `${reportExamples.report_segments!.captureId}.normalize-report.json`;
 const report = (change: (r: Json) => void = () => {}): string => {
   const r = structuredClone(reportExamples.report_segments!);
   change(r);
@@ -82,6 +88,12 @@ describe('A10: every tracked file the rule covers is allowed (fail closed)', () 
 
   it.each(files)('%s is an allowed file', (path) => {
     expect(classifyRepoPath(path)).toEqual({ ok: true, kind: expect.any(String) });
+  });
+
+  it('finds no raw capture record on a line of its own in any other tracked text file, whatever its name', () => {
+    const other = trackedOtherFiles();
+    expect(other).toEqual(expect.arrayContaining(['README.md', 'package.json', 'schemas/examples/capture-record.v1.examples.json']));
+    expect(other.map((path) => ({ path, verdict: classifyOtherPath(path) })).filter((f) => !f.verdict.ok)).toEqual([]);
   });
 
   it('ships the pre-push hook executable (git skips a hook that is not, and the push goes through)', () => {
@@ -142,20 +154,51 @@ describe('A10 file listing (the tree under test)', () => {
     expect(classifyTrackedFile('fixtures/synthetic-baseline.jsonl', readRepoFile('fixtures/synthetic-baseline.jsonl', root))).toEqual({ ok: true, kind: 'synthetic_v1' });
   });
 
-  it('lists every file force-added under captures/ and normalized/, whatever its name, and rejects each', () => {
-    const inCaptureDirs = ['captures/123e4567-e89b-42d3-a456-426614174000-0.jsonl', 'captures/notes.txt', 'normalized/seg0.jsonl', 'normalized/run.normalize-report.json', 'normalized/deep/x.bin', 'Captures/x.jsonl.gz', 'NORMALIZED/notes.txt'];
+  it('lists every file force-added under a captures/ or normalized/ directory, at any depth and whatever its name, and rejects each', () => {
+    const inCaptureDirs = ['captures/123e4567-e89b-42d3-a456-426614174000-0.jsonl', 'captures/notes.txt', 'normalized/seg0.jsonl', 'normalized/run.normalize-report.json', 'normalized/deep/x.bin', 'Captures/x.jsonl.gz', 'NORMALIZED/notes.txt', 'sub/captures/raw.bin', 'a/b/Normalized/x.txt'];
     const root = newRepo({ '.gitignore': 'captures/\nnormalized/\nCaptures/\nNORMALIZED/\n', 'fixtures/synthetic-baseline.jsonl': synthetic, ...Object.fromEntries(inCaptureDirs.map((p) => [p, raw])) });
     gitIn(root, 'add', '-A', '-f');
     expect(trackedHygieneFiles(root)).toEqual([...inCaptureDirs, 'fixtures/synthetic-baseline.jsonl'].sort());
-    for (const path of inCaptureDirs) expect(classifyRepoPath(path, root)).toMatchObject({ ok: false, reason: expect.stringMatching(/under captures\/ or normalized\//) });
+    for (const path of inCaptureDirs) expect(classifyRepoPath(path, root)).toMatchObject({ ok: false, reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) });
   });
 
   it('lists normalize reports anywhere, in any letter case, and checks them against the closed report schema', () => {
-    const root = newRepo({ 'evidence/a.normalize-report.json': report(), 'evidence/B.NORMALIZE-REPORT.JSON': report((r) => (r.payload = '{"channel":"book"}')) });
+    const root = newRepo({ [`evidence/${REPORT_NAME}`]: report(), 'evidence/B.NORMALIZE-REPORT.JSON': report((r) => (r.payload = '{"channel":"book"}')) });
     gitIn(root, 'add', '-A', '-f');
-    expect(trackedHygieneFiles(root)).toEqual(['evidence/B.NORMALIZE-REPORT.JSON', 'evidence/a.normalize-report.json']);
-    expect(classifyTrackedFile('evidence/a.normalize-report.json', readRepoFile('evidence/a.normalize-report.json', root))).toEqual({ ok: true, kind: 'normalize_report_v1' });
+    expect(trackedHygieneFiles(root)).toEqual([`evidence/${REPORT_NAME}`, 'evidence/B.NORMALIZE-REPORT.JSON']);
+    expect(classifyTrackedFile(`evidence/${REPORT_NAME}`, readRepoFile(`evidence/${REPORT_NAME}`, root))).toEqual({ ok: true, kind: 'normalize_report_v1' });
     expect(classifyTrackedFile('evidence/B.NORMALIZE-REPORT.JSON', readRepoFile('evidence/B.NORMALIZE-REPORT.JSON', root))).toMatchObject({ ok: false, reason: expect.stringMatching(/must NOT have additional properties/) });
+  });
+
+  it('checks every other tracked text file line by line for a raw capture record, whatever its extension', () => {
+    const trade = JSON.stringify(captureExamples.message_trade);
+    const root = newRepo({
+      'fixtures/synthetic-baseline.jsonl': synthetic,
+      'data.ndjson': raw,
+      'notes/capture.txt': `a note\n  ${trade}  \n`,
+      'dump.json': JSON.stringify(captureExamples.manifest_start) + '\n',
+      'capture.jsonl.txt': raw,
+      'README.md': `# fine\n${JSON.stringify(venueFrames.trade)}\n`,
+      'blob.bin': Buffer.from([0xff, 0xfe, 0x00, 0x7b]),
+    });
+    gitIn(root, 'add', '-A');
+    const verdicts = Object.fromEntries(trackedOtherFiles(root).map((path) => [path, classifyOtherPath(path, root)]));
+    expect(verdicts).toEqual({
+      'README.md': { ok: true, kind: 'other_text' },
+      'blob.bin': { ok: true, kind: 'not_inspected' },
+      'capture.jsonl.txt': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
+      'data.ndjson': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
+      'dump.json': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
+      'notes/capture.txt': { ok: false, reason: 'line 2 is a raw capture record, in a file the fixture rules do not cover' },
+    });
+  });
+
+  it('documents what the content check cannot see: a record over several lines, inside other text, or compressed', () => {
+    // Disclosed limits (contract section 6.5), not guarantees: each of these passes the check.
+    const record = captureExamples.message_trade!;
+    expect(classifyOtherFile(Buffer.from(JSON.stringify(record, null, 2) + '\n'))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from(`const x = ${JSON.stringify(record)};\n`))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xff]))).toEqual({ ok: true, kind: 'not_inspected' });
   });
 
   it('fails on bytes that are not UTF-8 instead of decoding them to a replacement character', () => {
@@ -209,12 +252,13 @@ describe('A10 file listing (the tree under test)', () => {
       'CAPTURES/other.txt': 'x',
       'normalized/seg.jsonl': raw,
       'deep/out/raw.jsonl': raw,
-      'deep/r.normalize-report.json': report(),
+      [`deep/${REPORT_NAME}`]: report(),
+      'deep/captures/x.bin': raw,
       'node_modules/pkg/x.jsonl': raw,
       'out/baseline/steered.ledger.jsonl': raw,
       'dist/x.jsonl': raw,
     });
-    expect(trackedHygieneFiles(root)).toEqual(['CAPTURES/other.txt', 'captures/cap-0.jsonl', 'captures/readme.txt', 'deep/out/raw.jsonl', 'deep/r.normalize-report.json', 'fixtures/a.jsonl', 'normalized/seg.jsonl']);
+    expect(trackedHygieneFiles(root)).toEqual(['CAPTURES/other.txt', 'captures/cap-0.jsonl', 'captures/readme.txt', `deep/${REPORT_NAME}`, 'deep/captures/x.bin', 'deep/out/raw.jsonl', 'fixtures/a.jsonl', 'normalized/seg.jsonl']);
   });
 });
 
@@ -232,6 +276,34 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     expect(scan.violations).toEqual([{ commit: added, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }]);
   });
 
+  it('checks other files and commit messages too: a raw record in a .ndjson file added and deleted, and one pasted into a message', () => {
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const base = commitAll(root, 'base');
+    writeFileSync(join(root, 'data.ndjson'), raw);
+    const added = commitAll(root, 'add a raw capture under another name');
+    gitIn(root, 'rm', '-q', 'data.ndjson');
+    commitAll(root, 'delete it again');
+    const pasted = commitAll(root, `a message\n\n${JSON.stringify(captureExamples.message_trade)}\n`);
+    const scan = historyViolations(root, [`${base}..HEAD`]);
+    expect(scan.commits).toBe(3);
+    expect(scan.violations).toEqual([
+      { commit: added, path: 'data.ndjson', reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
+      { commit: pasted, path: '(commit message)', reason: 'line 3 of the commit message is a raw capture record' },
+    ]);
+  });
+
+  it('reads the message of an annotated tag, and of a tag it points to, with the same content check', () => {
+    const root = newRepo({ 'README.md': 'x' });
+    commitAll(root, 'base');
+    gitIn(root, 'tag', '-a', '-m', `inner\n${JSON.stringify(captureExamples.manifest_start)}`, 'inner');
+    gitIn(root, 'tag', '-a', '-m', 'outer, clean', 'outer', 'inner');
+    const outer = gitIn(root, 'rev-parse', 'outer').trim();
+    const inner = gitIn(root, 'rev-parse', 'inner').trim();
+    expect(tagMessageViolations(root, outer)).toEqual([{ commit: inner, path: '(tag message)', reason: 'line 2 of the tag message is a raw capture record' }]);
+    expect(tagMessageViolations(root, gitIn(root, 'rev-parse', 'HEAD').trim())).toEqual([]);
+    expect(() => tagMessageViolations(root, 'f'.repeat(40))).toThrow(/cannot read tag object/);
+  });
+
   it('names the commit that brought a disallowed file into the range, however many later commits keep it', () => {
     const root = newRepo({ 'README.md': 'x' });
     const base = commitAll(root, 'base');
@@ -239,7 +311,7 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     const added = commitAll(root, 'add a raw capture');
     writeFileSync(join(root, 'README.md'), 'y');
     commitAll(root, 'an unrelated change that keeps it');
-    expect(historyViolations(root, [`${base}..HEAD`])).toEqual({ commits: 2, blobsChecked: 1, violations: [{ commit: added, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }] });
+    expect(historyViolations(root, [`${base}..HEAD`])).toEqual({ commits: 2, blobsChecked: 1, otherBlobsChecked: 2, violations: [{ commit: added, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }] });
   });
 
   it('finds any file that was force-added under captures/ or normalized/ in the range, binary files included', () => {
@@ -251,18 +323,18 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     const added = commitAll(root, 'force-add a compressed capture');
     gitIn(root, 'rm', '-q', '-r', '--cached', 'captures');
     commitAll(root, 'untrack it');
-    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([{ commit: added, path: 'captures/c-0.jsonl.gz', reason: expect.stringMatching(/under captures\/ or normalized\//) }]);
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([{ commit: added, path: 'captures/c-0.jsonl.gz', reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) }]);
   });
 
   it('finds a normalize report that carried a value outside the closed schema in an earlier commit of the range', () => {
     const root = newRepo({ 'README.md': 'x' });
     const base = commitAll(root, 'base');
-    writeFileSync(join(root, 'evidence.normalize-report.json'), report((r) => (r.dropped.depthWhileUnsynced.values = ['62710.4'])));
+    writeFileSync(join(root, REPORT_NAME), report((r) => (r.dropped.depthWhileUnsynced.values = ['62710.4'])));
     const leaked = commitAll(root, 'report with values');
-    writeFileSync(join(root, 'evidence.normalize-report.json'), report());
+    writeFileSync(join(root, REPORT_NAME), report());
     commitAll(root, 'report fixed');
     const scan = historyViolations(root, [`${base}..HEAD`]);
-    expect(scan.violations).toEqual([{ commit: leaked, path: 'evidence.normalize-report.json', reason: expect.stringMatching(/additional properties/) }]);
+    expect(scan.violations).toEqual([{ commit: leaked, path: REPORT_NAME, reason: expect.stringMatching(/additional properties/) }]);
   });
 
   it('scans exactly the commits the range names: an earlier deleted file is outside base..head, inside a full scan of head', () => {
@@ -272,8 +344,8 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     const base = commitAll(root, 'deleted before the base');
     writeFileSync(join(root, 'fixture.jsonl'), synthetic);
     commitAll(root, 'a clean commit');
-    expect(historyViolations(root, [`${base}..HEAD`])).toEqual({ commits: 1, blobsChecked: 1, violations: [] });
-    expect(historyViolations(root, ['HEAD'])).toEqual({ commits: 3, blobsChecked: 2, violations: [{ commit: early, path: 'old.jsonl', reason: expect.stringMatching(/raw capture record/) }] });
+    expect(historyViolations(root, [`${base}..HEAD`])).toMatchObject({ commits: 1, blobsChecked: 1, violations: [] });
+    expect(historyViolations(root, ['HEAD'])).toMatchObject({ commits: 3, blobsChecked: 2, violations: [{ commit: early, path: 'old.jsonl', reason: expect.stringMatching(/raw capture record/) }] });
   });
 
   it('scans each commit of the range whole, so a disallowed file the base already carries is reported with the first commit', () => {
@@ -285,11 +357,11 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
   });
 
   it('checks each distinct (content, path) pair: a later bad version of a path, and identical bytes under a new path', () => {
-    const root = newRepo({ 'evidence.normalize-report.json': report() });
+    const root = newRepo({ [REPORT_NAME]: report() });
     const base = commitAll(root, 'a clean report in the base');
-    writeFileSync(join(root, 'evidence.normalize-report.json'), report((r) => (r.dropped.depthWhileUnsynced.values = ['62710.4'])));
+    writeFileSync(join(root, REPORT_NAME), report((r) => (r.dropped.depthWhileUnsynced.values = ['62710.4'])));
     const leaked = commitAll(root, 'a later version with values');
-    writeFileSync(join(root, 'evidence.normalize-report.json'), report());
+    writeFileSync(join(root, REPORT_NAME), report());
     commitAll(root, 'back to clean');
     writeFileSync(join(root, 'f.jsonl'), synthetic);
     commitAll(root, 'an allowed fixture');
@@ -298,8 +370,8 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     gitIn(root, 'add', '-f', 'captures/f.jsonl');
     const forced = commitAll(root, 'the same bytes under captures/');
     expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([
-      { commit: leaked, path: 'evidence.normalize-report.json', reason: expect.stringMatching(/additional properties/) },
-      { commit: forced, path: 'captures/f.jsonl', reason: expect.stringMatching(/under captures\/ or normalized\//) },
+      { commit: leaked, path: REPORT_NAME, reason: expect.stringMatching(/additional properties/) },
+      { commit: forced, path: 'captures/f.jsonl', reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) },
     ]);
   });
 
@@ -326,7 +398,7 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     gitIn(root, 'commit', '-q', '-m', 'a link, a submodule entry and a force-added file');
     const added = gitIn(root, 'rev-parse', 'HEAD').trim();
     expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([
-      { commit: added, path: 'Normalized/seg.txt', reason: expect.stringMatching(/under captures\/ or normalized\//) },
+      { commit: added, path: 'Normalized/seg.txt', reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) },
       { commit: added, path: 'link.jsonl', reason: expect.stringMatching(/symbolic link/) },
       { commit: added, path: 'sub.jsonl', reason: expect.stringMatching(/submodule entry/) },
     ]);
@@ -399,7 +471,7 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
 });
 
 describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', () => {
-  /** A clone opted in exactly as the contract says, with a bare remote; its node_modules and tests are the repository's own, untracked. */
+  /** A clone opted in through core.hooksPath, with a bare remote; its node_modules and tests are the repository's own, untracked. */
   const hookClone = (withNodeModules = true): { root: string; remote: string; hookGit: (...args: string[]) => string; push: (...args: string[]) => string } => {
     const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
     const remote = tempDir();
@@ -522,6 +594,48 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     expect(remoteRef(c.remote, 'c')).toBeUndefined();
   });
 
+  it('installed in .git/hooks as the contract recommends, refuses a push from a checkout without the scan', () => {
+    const c = hookClone();
+    c.hookGit('config', '--unset', 'core.hooksPath');
+    copyFileSync(join(c.root, '.githooks', 'pre-push'), join(c.root, '.git', 'hooks', 'pre-push'));
+    chmodSync(join(c.root, '.git', 'hooks', 'pre-push'), 0o755);
+    // An older checkout: no scan in the working tree.
+    rmSync(join(c.root, 'tests'));
+    expect(c.push('origin', 'main')).toMatch(/A10 pre-push: this checkout has no tests\/a10-history-cli\.ts or tests\/jsonl-policy\.ts/);
+    expect(remoteRef(c.remote, 'main')).toBeUndefined();
+  });
+
+  it('documents the core.hooksPath limit: on a checkout without .githooks/pre-push nothing runs, where the .git/hooks copy refuses', () => {
+    const c = hookClone();
+    c.hookGit('rm', '-q', '.githooks/pre-push');
+    c.hookGit('commit', '-q', '-m', 'a tree without the hook, as on main before the rule');
+    addAndDeleteRaw(c);
+    const head = c.hookGit('rev-parse', 'HEAD').trim();
+    // core.hooksPath=.githooks: there is no hook in this checkout, and the push goes through unscanned.
+    c.hookGit('push', '-q', 'origin', `${head}:refs/heads/unscanned`);
+    expect(remoteRef(c.remote, 'unscanned')).toBe(head);
+    // The copy in .git/hooks still runs, and the scan (here still in the working tree) refuses the same commits.
+    c.hookGit('config', '--unset', 'core.hooksPath');
+    mkdirSync(join(c.root, '.git', 'hooks'), { recursive: true });
+    writeFileSync(join(c.root, '.git', 'hooks', 'pre-push'), read('.githooks/pre-push'), { mode: 0o755 });
+    expect(c.push('origin', 'main')).toMatch(/"data\.jsonl": non-blank line 1 is a raw capture record/);
+    expect(remoteRef(c.remote, 'main')).toBeUndefined();
+  });
+
+  it('refuses to push an annotated tag whose message is a raw capture record, and a git notes ref whose note is one', () => {
+    const c = hookClone();
+    expect(c.push('origin', 'main')).toBe('');
+    const record = JSON.stringify(captureExamples.message_trade);
+    c.hookGit('tag', '-a', '-m', `release\n\n${record}`, 'v-raw');
+    expect(c.push('origin', 'refs/tags/v-raw')).toMatch(/\(tag message\): line 3 of the tag message is a raw capture record/);
+    expect(remoteRef(c.remote, 'refs/tags/v-raw')).toBeUndefined();
+    c.hookGit('tag', '-a', '-m', 'a clean release', 'v-clean');
+    expect(c.push('origin', 'refs/tags/v-clean')).toBe('');
+    c.hookGit('notes', 'add', '-m', record, 'HEAD');
+    expect(c.push('origin', 'refs/notes/commits')).toMatch(/line 1 is a raw capture record, in a file the fixture rules do not cover/);
+    expect(remoteRef(c.remote, 'refs/notes/commits')).toBeUndefined();
+  });
+
   it('refuses the push when it cannot run (no node_modules), rather than letting it through', () => {
     const c = hookClone(false);
     expect(c.push('origin', 'main')).toMatch(/A10 pre-push: node_modules\/\.bin\/tsx is missing/);
@@ -570,7 +684,7 @@ describe('A10 classifier', () => {
     ['rejections out of order', (r) => r.rejections.reverse(), /rejections not in strictly ascending order/],
     ['a rejection listed twice', (r) => r.rejections.push(structuredClone(r.rejections[3])), /rejections not in strictly ascending order/],
     ['supersedes out of order', (r) => (r.supersedes = [1, 0].map((segmentIndex) => ({ segmentIndex, fixtureSha256: 'd'.repeat(64), normalizerVersion: '0.1.0', normalizerCommit: '89abcde', adapterVersion: '1' }))), /supersedes not in strictly ascending/],
-  ])('rejects a schema-valid report with %s, so an order or a name carries nothing', (_name, change, reason) => {
+  ])('rejects a schema-valid report with %s (the order and naming rules; they narrow, not close, what a report can encode)', (_name, change, reason) => {
     expect(classifyNormalizeReport(report(change))).toMatchObject({ ok: false, reason: expect.stringMatching(reason) });
   });
 
@@ -586,8 +700,57 @@ describe('A10 classifier', () => {
     ['a too_short segment under another rule', (r) => { r.segments[1].rule = 'R2'; r.rejections[0].rule = 'R2'; }, /segment 1 too_short under R2, not R7/],
     ['a refused segment under R7', (r) => { r.segments[2].rule = 'R7'; r.rejections[1].rule = 'R7'; }, /segment 2 refused under R7/],
     ['a cut listed as an R3 rejection', (r) => r.rejections.splice(2, 0, { rule: 'R3', scope: 'segment', segmentIndex: 0, at: { fileIndex: 0, record: 70000 }, field: null }), /rule R3, a cut, listed as a rejection/],
-  ])('rejects a schema-valid report with %s, so a free choice among codes carries nothing', (_name, change, reason) => {
+  ])('rejects a schema-valid report with %s (the rule pairings; the choice among allowed codes stays open)', (_name, change, reason) => {
     expect(classifyNormalizeReport(report(change))).toMatchObject({ ok: false, reason: expect.stringMatching(reason) });
+  });
+
+  const r4At = (r: Json): Json => r.rejections.find((j: Json) => j.rule === 'R4');
+  it.each<[string, (r: Json) => void, RegExp]>([
+    ['a count too large to be a safe integer', (r) => (r.options.windowMs = 6.27104e25), /not a safe integer/],
+    ['a record reference beyond the raw files it lists', (r) => (r.cuts[1].at = { fileIndex: 7, record: 1 }), /7:1 outside the raw files the report lists/],
+    ['a record reference beyond a file\'s file_end', (r) => (r.dropped.depthBeforeSnapshot.records[1].record = 120001), /0:120001 outside the raw files/],
+    ['a segment that starts after its end', (r) => (r.segments[1].start = { fileIndex: 1, record: 41300 }), /segment 1 starts after its end/],
+    ['overlapping segments', (r) => (r.segments[1].start = { fileIndex: 1, record: 40000 }), /segment 1 does not start after segment 0 ends/],
+    ['a start reason that does not follow the previous end reason', (r) => (r.segments[1].startReason = 'resync_after_clock_cut'), /segment 1 starts with resync_after_clock_cut, not resync_after_gap/],
+    ['a first segment that does not start with capture_start', (r) => (r.segments[0].startReason = 'resync_after_gap'), /segment 0 starts with resync_after_gap, not capture_start/],
+    ['capture_end on a segment that is not the last', (r) => { r.segments[0].endReason = 'capture_end'; r.cuts.shift(); }, /segment 0 ends with capture_end but is not the last/],
+    ['a refused segment with no rejection', (r) => r.rejections.splice(1, 1), /segment 2 \(refused\) with 0 segment rejections/],
+    ['a cut for a segment the report does not list', (r) => (r.cuts[1].segmentIndex = 9), /a cut for segment 9/],
+    ['a cut whose reason is not its segment\'s end reason', (r) => (r.cuts[0].reason = 'clock_cut'), /a cut clock_cut for segment 0, which ends with checksum_mismatch/],
+    ['a cut that is not after its segment\'s end', (r) => (r.cuts[0].at = { fileIndex: 1, record: 40999 }), /not after its end/],
+    ['two cuts for one segment', (r) => r.cuts.splice(1, 0, { segmentIndex: 0, reason: 'checksum_mismatch', at: { fileIndex: 1, record: 41002 } }), /two cuts for segment 0/],
+    ['an R2 rejection that names a record', (r) => { const [j] = r.rejections.splice(1, 1); j.at = { fileIndex: 1, record: 41500 }; r.rejections.push(j); }, /rule R2 with at a record/],
+    ['an R4 rejection whose record no R4 dropped key lists', (r) => (r4At(r).at = { fileIndex: 0, record: 70124 }), /R4 rejections and the records of the R4 dropped keys disagree/],
+    ['an R4 rejection naming another field than its key', (r) => (r4At(r).field = 'price'), /R4 rejections and the records of the R4 dropped keys disagree at 0:70123:price/],
+    ['an R4 rejection with another segment\'s index', (r) => (r4At(r).segmentIndex = 1), /segmentIndex 1, not that of the segment whose span holds it/],
+    ['an R4 rejection with a null segment index inside a segment', (r) => (r4At(r).segmentIndex = null), /segmentIndex null/],
+    ['an R4 dropped record with no rejection', (r) => r.dropped.foreignSymbol.records.push({ fileIndex: 0, record: 90000 }) && (r.dropped.foreignSymbol.count = 1), /disagree at 0:90000:pair/],
+    ['a supersedes entry that this run reproduces', (r) => (r.supersedes = [{ segmentIndex: 0, fixtureSha256: r.segments[0].fixtureSha256, normalizerVersion: '0.1.0', normalizerCommit: '89abcde', adapterVersion: '1' }]), /supersedes entry for segment 0 that this run reproduces/],
+  ])('rejects a schema-valid report with %s (a cross-reference or bound, contract section 6.5)', (_name, change, reason) => {
+    expect(classifyNormalizeReport(report(change))).toMatchObject({ ok: false, reason: expect.stringMatching(reason) });
+  });
+
+  it('accepts a foreign-symbol trade item as one R4 rejection naming pair, with the segment whose span holds it', () => {
+    const accepted = report((r) => {
+      r.dropped.foreignSymbol = { count: 2, records: [{ fileIndex: 0, record: 70200 }] };
+      r.rejections.splice(3, 0, { rule: 'R4', scope: 'item', segmentIndex: 0, at: { fileIndex: 0, record: 70200 }, field: 'pair' });
+    });
+    expect(classifyNormalizeReport(accepted)).toEqual({ ok: true, kind: 'normalize_report_v1' });
+    const outside = report((r) => {
+      r.dropped.foreignSymbol = { count: 1, records: [{ fileIndex: 1, record: 41210 }] };
+      r.dropped.socketNotSubscribed.records.shift();
+      r.dropped.socketNotSubscribed.count = 1;
+      r.rejections.push({ rule: 'R4', scope: 'item', segmentIndex: null, at: { fileIndex: 1, record: 41210 }, field: 'pair' });
+    });
+    expect(classifyNormalizeReport(outside)).toEqual({ ok: true, kind: 'normalize_report_v1' });
+  });
+
+  it('requires a tracked report to be named for the capture it carries', () => {
+    const text = report();
+    expect(classifyTrackedFile(`evidence/${REPORT_NAME}`, text)).toEqual({ ok: true, kind: 'normalize_report_v1' });
+    for (const name of ['evidence/a.normalize-report.json', 'trade 81234567 buy 0.0012 @ 62710.5.normalize-report.json', `x/${REPORT_NAME.toUpperCase()}`, '00000000-0000-4000-8000-000000000000.normalize-report.json']) {
+      expect(classifyTrackedFile(name, text)).toMatchObject({ ok: false, reason: expect.stringMatching(/file name is not 123e4567-e89b-42d3-a456-426614174000\.normalize-report\.json/) });
+    }
   });
 
   it('accepts the shape of a recorded fixture whose rights block is permitted + sample_permitted (constructed; establishes no permission)', () => {

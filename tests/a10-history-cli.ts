@@ -7,6 +7,8 @@
 //                                                           from head (CI is triggered by nothing else, contract
 //                                                           section 6.5)
 //   tsx tests/a10-history-cli.ts --revs <rev-list args...>   the opt-in pre-push hook (.githooks/pre-push)
+//   tsx tests/a10-history-cli.ts --tag <sha>                 the hook, for each annotated tag it pushes: the content
+//                                                           check of the tag's message (and of any tag it points to)
 //
 // Exit status: 0 when no commit in the range carries a disallowed file, 1 when one does, 2 when the range cannot be
 // scanned (missing arguments, a git failure, or a policy module that cannot load), so a scan that cannot run fails
@@ -40,7 +42,25 @@ function revArgs(argv: string[]): string[] | undefined {
   return [`${base}..${head}`];
 }
 
+async function tagMain(sha: string | undefined): Promise<number> {
+  if (sha === undefined || sha.length === 0) {
+    console.error('A10 tag: give --tag <sha>; nothing was scanned');
+    return 2;
+  }
+  try {
+    const { tagMessageViolations } = await import('./jsonl-policy.js');
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const violations = tagMessageViolations(root, sha);
+    for (const v of violations) console.error(`A10 tag: ${v.commit} ${v.path}: ${v.reason}`);
+    return violations.length === 0 ? 0 : 1;
+  } catch (e) {
+    console.error(`A10 tag: the tag could not be scanned: ${(e as Error).message}`);
+    return 2;
+  }
+}
+
 async function main(): Promise<number> {
+  if (process.argv[2] === '--tag') return tagMain(process.argv[3]);
   const args = revArgs(process.argv.slice(2));
   if (args === undefined) {
     console.error('A10 history: give --base <sha> --head <sha>, or --revs <rev-list arguments>; nothing was scanned');
@@ -52,7 +72,7 @@ async function main(): Promise<number> {
     const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     const scan = historyViolations(root, args);
     for (const v of scan.violations) console.error(`A10 history: ${v.commit} ${JSON.stringify(v.path)}: ${v.reason}`);
-    console.log(`A10 history: ${scan.commits} commits (${args.join(' ')}), ${scan.blobsChecked} covered files checked, ${scan.violations.length} violations`);
+    console.log(`A10 history: ${scan.commits} commits (${args.join(' ')}), ${scan.blobsChecked} covered files and ${scan.otherBlobsChecked} other files checked, commit messages included, ${scan.violations.length} violations`);
     return scan.violations.length === 0 ? 0 : 1;
   } catch (e) {
     console.error(`A10 history: the range could not be scanned: ${(e as Error).message}`);

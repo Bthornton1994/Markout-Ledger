@@ -201,10 +201,25 @@ describe('capture-record.v1 schema', () => {
       expected: [{ instancePath: '', keyword: 'required', params: { missingProperty: 'instrumentSpec' } }],
     },
     {
-      name: 'manifest_start whose captureId is not a UUID (format)',
+      name: 'manifest_start whose captureId is not a UUID (format and the version-4 pattern)',
       from: 'manifest_start',
       mutate: (d) => (d.captureId = 'capture-1'),
-      expected: [{ instancePath: '/captureId', keyword: 'format', params: { format: 'uuid' } }],
+      expected: [
+        { instancePath: '/captureId', keyword: 'pattern' },
+        { instancePath: '/captureId', keyword: 'format', params: { format: 'uuid' } },
+      ],
+    },
+    {
+      name: 'manifest_start whose captureId is an upper-case UUID (pattern: lower case only, contract section 3)',
+      from: 'manifest_start',
+      mutate: (d) => (d.captureId = '123E4567-E89B-42D3-A456-426614174000'),
+      expected: [{ instancePath: '/captureId', keyword: 'pattern' }],
+    },
+    {
+      name: 'manifest_start whose captureId is a UUID of another version (pattern: version 4 only)',
+      from: 'manifest_start',
+      mutate: (d) => (d.captureId = '123e4567-e89b-12d3-a456-426614174000'),
+      expected: [{ instancePath: '/captureId', keyword: 'pattern' }],
     },
     {
       name: 'manifest_start whose startedAtIso has no time zone (format)',

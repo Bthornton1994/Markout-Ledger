@@ -209,6 +209,10 @@
           "count": 0,
           "records": []
         },
+        "foreignSymbol": {
+          "count": 0,
+          "records": []
+        },
         "offTickPrice": {
           "count": 0,
           "records": []
@@ -252,9 +256,9 @@
         "records.ws_error": 0,
         "records.subscribe": 10,
         "records.unsubscribe": 1,
-        "records.ping": 400,
-        "records.message": 179562,
-        "records.probe": 18,
+        "records.ping": 175,
+        "records.message": 179796,
+        "records.probe": 9,
         "records.note": 1,
         "records.file_end": 2,
         "records.manifest_end": 1,

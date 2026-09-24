@@ -3,18 +3,19 @@
 // Fail closed: every tracked file the rule covers must be one of the allowed kinds below, and anything this policy
 // cannot classify fails. The rule covers three kinds of path:
 //
-//   any path under the root's captures/ or normalized/   never allowed, whatever the file (both directories are the
-//                                                        default output of the capture and normalize tools and are in
-//                                                        .gitignore; a file there enters Git only by force)
-//   a name ending in .normalize-report.json              must validate against schemas/normalize-report.v1.schema.json,
-//                                                        which is closed (contract section 5.10); its bytes must be
-//                                                        exactly its canonical serialization (every object's keys
-//                                                        sorted, JSON.stringify with an indent of 2 and one newline);
-//                                                        its arrays must be in the contract's order; each fixtureFile
-//                                                        must name its own capture and segment; and each rule must
-//                                                        carry its own scope and fields, so a duplicated key,
-//                                                        whitespace or an order carries nothing
-//   a name ending in .jsonl                              must be one of the two allowed fixture kinds:
+//   any path under a directory named captures/ or    never allowed, whatever the file (both directories are the
+//   normalized/, at the root or at any depth         default output of the capture and normalize tools and .gitignore
+//                                                    ignores them at any depth; a file there enters Git only by force)
+//   a name ending in .normalize-report.json          must be named <captureId>.normalize-report.json for the captureId
+//                                                    it carries and validate against the closed
+//                                                    schemas/normalize-report.v1.schema.json (contract section 5.10);
+//                                                    its bytes must be exactly its canonical serialization (every
+//                                                    object's keys sorted, JSON.stringify with an indent of 2 and one
+//                                                    newline); every number must be a safe integer; its arrays must be
+//                                                    in the contract's order; each fixtureFile must name its own
+//                                                    capture and segment; each rule must carry its own scope and
+//                                                    fields; and its cross-references must agree (reportViolation)
+//   a name ending in .jsonl                          must be one of the two allowed fixture kinds:
 //
 //   synthetic_v1              the engine's version-1 synthetic fixture format: the header has only the documented
 //                             version-1 keys, each with its version-1 type, synthetic: true, provenance.source
@@ -37,8 +38,11 @@
 // the version-1 format and labelled synthetic pass kind synthetic_v1); a venue payload pasted into a string value of
 // either fixture kind, or into an open object of a recorded fixture; a recorded value encoded into a normalize report's
 // constrained values (an integer in any integer field, the number of entries in an array, the choice among the
-// enumerated codes a value may take, or bytes hex-encoded into a hash, UUID, commit or version string); or any file whose name matches none of the three kinds (.ndjson, .json other than a normalize report,
-// compressed files). Review remains the control for those.
+// enumerated codes a value may take, or bytes hex-encoded into a hash, UUID, commit or version string). Every other
+// tracked text file, and every commit message and annotated tag message the history scan and the hook read, gets only a
+// content check (rawRecordLine): a raw capture record on a line of its own is found under any name, but not one spread
+// over several lines, embedded in other text, encoded, compressed or in a file that is not UTF-8 text. Review remains
+// the control for those.
 //
 // Two scopes use the same rule: trackedHygieneFiles lists the tree under test (the files tracked at this moment), and
 // historyViolations scans every commit of a commit range, so a file added and deleted again inside the range is still
@@ -69,7 +73,7 @@ const decodeStrict = (bytes: Uint8Array): string => new TextDecoder('utf-8', { f
 export const readRepoFile = (path: string, root: string = repoRootPath): string => decodeStrict(readFileSync(join(root, path)));
 
 export type Verdict =
-  | { ok: true; kind: 'synthetic_v1' | 'recorded_v2_publishable' | 'normalize_report_v1' }
+  | { ok: true; kind: 'synthetic_v1' | 'recorded_v2_publishable' | 'normalize_report_v1' | 'other_text' | 'not_inspected' }
   | { ok: false; reason: string };
 /** The verdict type of the .jsonl classifier (kept for its original name). */
 export type JsonlVerdict = Verdict;
@@ -130,6 +134,41 @@ function outsideShape(obj: Record<string, unknown>, shape: Record<string, Check>
 /** A raw capture record (schemas/capture-record.v1.schema.json): a record type of that schema, or both receive clocks. */
 function isRawCaptureRecord(v: Record<string, any>): boolean {
   return (typeof v.type === 'string' && CAPTURE_RECORD_TYPES.has(v.type)) || ('recvWallMs' in v && 'recvMonoNs' in v);
+}
+
+/**
+ * The 1-based number of the first line of `text` that, trimmed, is a JSON object that is a raw capture record, or
+ * undefined. This is the content check applied to every tracked text file the three kinds above do not cover: it finds
+ * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). It cannot see a record
+ * spread over several lines, embedded in other text, compressed, encoded or in a binary file (contract section 6.5).
+ */
+export function rawRecordLine(text: string): number | undefined {
+  const lines = text.split('\n');
+  for (const [i, raw] of lines.entries()) {
+    const line = raw.trim();
+    if (!line.startsWith('{') || !line.endsWith('}')) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (isObject(value) && isRawCaptureRecord(value)) return i + 1;
+  }
+  return undefined;
+}
+
+/** The verdict for a tracked file outside the three kinds: text is checked for raw capture record lines; bytes that are
+ * not UTF-8 (binary or compressed files) are not inspected. */
+export function classifyOtherFile(bytes: Uint8Array): Verdict {
+  let text: string;
+  try {
+    text = decodeStrict(bytes);
+  } catch {
+    return { ok: true, kind: 'not_inspected' };
+  }
+  const line = rawRecordLine(text);
+  return line === undefined ? { ok: true, kind: 'other_text' } : fail(`line ${line} is a raw capture record, in a file the fixture rules do not cover`);
 }
 
 export function classifyJsonl(text: string): Verdict {
@@ -224,7 +263,7 @@ const RULE_SHAPES: Record<string, { scope: string; fields: (string | null)[] }> 
   R1b: { scope: 'capture', fields: [null] },
   R2: { scope: 'segment', fields: [null] },
   R2b: { scope: 'segment', fields: [null] },
-  R4: { scope: 'item', fields: ['price', 'size', null] },
+  R4: { scope: 'item', fields: ['pair', 'price', 'size', null] },
   R5: { scope: 'capture', fields: ['priceDecimals', 'qtyDecimals', 'priceIncrement', 'instrumentSpec', 'pair', 'status'] },
   R6: { scope: 'segment', fields: [null] },
   R7: { scope: 'segment', fields: [null] },
@@ -239,15 +278,47 @@ const compareKeys = (a: number[], b: number[]): number => {
 };
 const strictlyAscending = (keys: number[][]): boolean => keys.every((k, i) => i === 0 || compareKeys(keys[i - 1]!, k) < 0);
 
+/** The R4 dropped keys, each with the field its rejections name (contract sections 5.5 and 5.10). */
+const R4_KEY_FIELDS: Record<string, string | null> = { foreignSymbol: 'pair', nonPositiveTradeSize: 'size', offTickPrice: 'price', offLotSize: 'size', undecodable: null };
+/** The rules whose rejection names no single record (contract section 5.10). */
+const AT_NULL_RULES = new Set(['R2', 'R2b', 'R5', 'R7', 'R8']);
+
+/** The first number in `value` that is not a safe integer (so JSON.stringify would write it with an exponent or a point). */
+function unsafeNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? undefined : value;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      const bad = unsafeNumber(v);
+      if (bad !== undefined) return bad;
+    }
+  } else if (typeof value === 'object' && value !== null) {
+    for (const v of Object.values(value)) {
+      const bad = unsafeNumber(v);
+      if (bad !== undefined) return bad;
+    }
+  }
+  return undefined;
+}
+
 /**
- * The first way a schema-valid report breaks the order, naming and pairing rules of contract section 5.10, or undefined:
- * raw files and segments numbered from 0 in order, cuts and each dropped entry's records in strictly ascending
- * raw-record order (so no record twice, and no more records than the count), rejections strictly ascending by (at,
- * segmentIndex, rule, field), supersedes by segmentIndex, each fixtureFile naming its own capture and segment, each rule
- * with its one scope and its own fields (R3, a cut, is never a rejection), a segment rejection naming the rule its
- * segment names, and too_short exactly under R7.
+ * The first way a schema-valid report breaks the order, naming, pairing and cross-reference rules of contract sections
+ * 5.10 and 6.5, or undefined. Order and naming: every number a safe integer; raw files and segments numbered from 0 in
+ * order; cuts and each dropped entry's records in strictly ascending raw-record order (so no record twice, and no more
+ * records than the count); rejections strictly ascending by (at, segmentIndex, rule, field); supersedes by
+ * segmentIndex; each fixtureFile naming its own capture and segment; each rule with its one scope and its own fields
+ * (R3, a cut, is never a rejection); a segment rejection naming the rule its segment names; too_short exactly under R7.
+ * Cross-references: every raw record reference inside the listed raw files (at most one past a file's records, its
+ * file_end, or two in the last file, its manifest_end); segments in raw order, each start not after its end, without
+ * overlap; start reasons following the previous segment's end reason; capture_end only on the last segment; exactly
+ * one segment rejection for each refused or too_short segment and none for a written one; each cut after the end of
+ * the segment it names, with that segment's end reason, and at most one per segment; a rejection's at null exactly for
+ * R2, R2b, R5, R7 and R8; each R4 rejection matching a record of its dropped key and the reverse, with the segmentIndex
+ * of the segment whose span holds its record, or null; and no supersedes entry repeating a segment this run wrote. It
+ * checks consistency, not truth, and not the rest of section 5.10 (which cuts a segment deserved, whether counts add up).
  */
-function reportOrderViolation(r: Record<string, any>): string | undefined {
+function reportViolation(r: Record<string, any>): string | undefined {
+  const unsafe = unsafeNumber(r);
+  if (unsafe !== undefined) return `a number (${String(unsafe)}) that is not a safe integer`;
   if (!r.rawFiles.every((f: any, i: number) => f.fileIndex === i)) return 'rawFiles not numbered 0, 1, 2, ... in order';
   if (!r.segments.every((s: any, i: number) => s.segmentIndex === i)) return 'segments not numbered 0, 1, 2, ... in order';
   const misnamed = r.segments.find((s: any) => s.fixtureFile !== null && s.fixtureFile !== `${r.captureId}-seg${s.segmentIndex}.jsonl`);
@@ -272,6 +343,60 @@ function reportOrderViolation(r: Record<string, any>): string | undefined {
     if (s.status === 'too_short' && s.rule !== 'R7') return `segment ${s.segmentIndex} too_short under ${s.rule}, not R7`;
     if (s.status === 'refused' && s.rule === 'R7') return `segment ${s.segmentIndex} refused under R7, which marks it too_short`;
   }
+  return crossReferenceViolation(r);
+}
+
+/** The cross-reference part of reportViolation. */
+function crossReferenceViolation(r: Record<string, any>): string | undefined {
+  const files = r.rawFiles as { records: number }[];
+  const refs: RecordRef[] = [
+    ...r.segments.flatMap((s: any) => [s.start, s.end]),
+    ...r.cuts.map((c: any) => c.at),
+    ...r.rejections.map((j: any) => j.at),
+    ...Object.values<any>(r.dropped).flatMap((e) => e.records),
+  ];
+  for (const ref of refs) {
+    if (ref === null) continue;
+    const file = files[ref.fileIndex];
+    const limit = file === undefined ? -1 : file.records + (ref.fileIndex === files.length - 1 ? 1 : 0);
+    if (ref.record > limit) return `a raw record reference ${ref.fileIndex}:${ref.record} outside the raw files the report lists`;
+  }
+  const cmp = (a: RecordRef, b: RecordRef): number => compareKeys(refKey(a), refKey(b));
+  const segments = r.segments as any[];
+  for (const [i, s] of segments.entries()) {
+    if (cmp(s.start, s.end) > 0) return `segment ${i} starts after its end`;
+    if (i > 0 && cmp(segments[i - 1].end, s.start) >= 0) return `segment ${i} does not start after segment ${i - 1} ends`;
+    const startReason = i === 0 ? 'capture_start' : segments[i - 1].endReason === 'clock_cut' ? 'resync_after_clock_cut' : 'resync_after_gap';
+    if (s.startReason !== startReason) return `segment ${i} starts with ${s.startReason}, not ${startReason}`;
+    if (s.endReason === 'capture_end' && i !== segments.length - 1) return `segment ${i} ends with capture_end but is not the last segment`;
+    const own = r.rejections.filter((j: any) => j.scope === 'segment' && j.segmentIndex === i).length;
+    if (own !== (s.status === 'written' ? 0 : 1)) return `segment ${i} (${s.status}) with ${own} segment rejections`;
+  }
+  const cutSegments = new Set<number>();
+  for (const c of r.cuts) {
+    const s = segments[c.segmentIndex];
+    if (s === undefined) return `a cut for segment ${c.segmentIndex}, which the report does not list`;
+    if (cutSegments.has(c.segmentIndex)) return `two cuts for segment ${c.segmentIndex}`;
+    cutSegments.add(c.segmentIndex);
+    if (c.reason !== s.endReason) return `a cut ${c.reason} for segment ${c.segmentIndex}, which ends with ${s.endReason}`;
+    if (cmp(s.end, c.at) >= 0) return `a cut for segment ${c.segmentIndex} that is not after its end`;
+  }
+  const r4 = new Set<string>();
+  for (const j of r.rejections) {
+    if ((j.at === null) !== AT_NULL_RULES.has(j.rule)) return `rule ${j.rule} with at ${j.at === null ? 'null' : 'a record'}`;
+    if (j.rule !== 'R4') continue;
+    const holder = segments.findIndex((s) => cmp(s.start, j.at) <= 0 && cmp(j.at, s.end) <= 0);
+    if (j.segmentIndex !== (holder === -1 ? null : holder)) return `an R4 rejection at ${j.at.fileIndex}:${j.at.record} with segmentIndex ${String(j.segmentIndex)}, not that of the segment whose span holds it`;
+    r4.add(`${j.at.fileIndex}:${j.at.record}:${String(j.field)}`);
+  }
+  const dropped = new Set<string>();
+  for (const [key, field] of Object.entries(R4_KEY_FIELDS)) {
+    for (const ref of r.dropped[key]?.records ?? []) dropped.add(`${ref.fileIndex}:${ref.record}:${String(field)}`);
+  }
+  const unmatched = [...r4].find((k) => !dropped.has(k)) ?? [...dropped].find((k) => !r4.has(k));
+  if (unmatched !== undefined) return `the R4 rejections and the records of the R4 dropped keys disagree at ${unmatched}`;
+  const repeated = (r.supersedes ?? []).find((e: any) => segments[e.segmentIndex]?.status === 'written' && segments[e.segmentIndex].fixtureSha256 === e.fixtureSha256);
+  if (repeated) return `a supersedes entry for segment ${repeated.segmentIndex} that this run reproduces`;
   return undefined;
 }
 
@@ -294,13 +419,13 @@ export function classifyNormalizeReport(text: string): Verdict {
   if (text !== canonicalReport(value)) {
     return fail('a normalize report whose bytes are not its canonical serialization (a duplicated key, another layout or another key order)');
   }
-  const disorder = reportOrderViolation(value as Record<string, any>);
-  if (disorder !== undefined) return fail(`a normalize report out of its canonical order: ${disorder}`);
+  const disorder = reportViolation(value as Record<string, any>);
+  if (disorder !== undefined) return fail(`a normalize report that breaks the order or cross-reference rules of contract section 5.10: ${disorder}`);
   return { ok: true, kind: 'normalize_report_v1' };
 }
 
 export type HygieneKind = 'capture_dir' | 'normalize_report' | 'jsonl';
-const CAPTURE_DIR_REASON = 'a file under captures/ or normalized/, which never enter Git, whatever the file';
+const CAPTURE_DIR_REASON = 'a file under a captures/ or normalized/ directory, which never enter Git, whatever the file';
 const SYMLINK_REASON = 'a symbolic link where the rule allows only a regular file';
 const SUBMODULE_REASON = 'a submodule entry where the rule allows only a regular file';
 const NOT_UTF8_REASON = 'bytes that are not UTF-8';
@@ -318,7 +443,7 @@ const isGitlink = (root: string, path: string): boolean =>
 
 /** Which part of the rule covers a repository-relative path, or undefined when the rule does not cover it. */
 export function hygieneKind(path: string): HygieneKind | undefined {
-  if (/^(captures|normalized)\//i.test(path)) return 'capture_dir';
+  if (/(^|\/)(captures|normalized)\//i.test(path)) return 'capture_dir';
   if (/\.normalize-report\.json$/i.test(path)) return 'normalize_report';
   if (/\.jsonl$/i.test(path)) return 'jsonl';
   return undefined;
@@ -329,8 +454,13 @@ export function classifyTrackedFile(path: string, text: string): Verdict {
   switch (hygieneKind(path)) {
     case 'capture_dir':
       return fail(CAPTURE_DIR_REASON);
-    case 'normalize_report':
-      return classifyNormalizeReport(text);
+    case 'normalize_report': {
+      const verdict = classifyNormalizeReport(text);
+      if (!verdict.ok) return verdict;
+      const name = path.slice(path.lastIndexOf('/') + 1);
+      const captureId = (JSON.parse(text) as { captureId: string }).captureId;
+      return name === `${captureId}.normalize-report.json` ? verdict : fail(`a normalize report whose file name is not ${captureId}.normalize-report.json, the name for the capture it carries`);
+    }
     case 'jsonl':
       return classifyJsonl(text);
     default:
@@ -406,6 +536,49 @@ export function trackedHygieneFiles(root: string = repoRootPath): string[] {
   return found.sort();
 }
 
+/**
+ * Every tracked regular file the three kinds do not cover, as root-relative paths, for the content check
+ * (classifyOtherFile). Symbolic links and submodule entries carry no file content of their own and are skipped here; in
+ * a checkout without .git the same fallback walk as trackedHygieneFiles is used.
+ */
+export function trackedOtherFiles(root: string = repoRootPath): string[] {
+  const other = (p: string): boolean => hygieneKind(p) === undefined;
+  if (existsSync(join(root, '.git'))) {
+    let listing: string;
+    try {
+      listing = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
+    }
+    return listing
+      .split('\0')
+      .filter((e) => e.startsWith('100'))
+      .map((e) => e.slice(e.indexOf('\t') + 1))
+      .filter(other)
+      .sort();
+  }
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!(dir === root && FALLBACK_SKIP.has(entry.name))) walk(path);
+      } else if (entry.isFile() && other(relative(root, path))) {
+        found.push(relative(root, path));
+      }
+    }
+  };
+  walk(root);
+  return found.sort();
+}
+
+/** The verdict for a tracked file outside the three kinds, read from `root` (see classifyOtherFile). */
+export function classifyOtherPath(path: string, root: string = repoRootPath): Verdict {
+  const stat = lstatSync(join(root, path), { throwIfNoEntry: false });
+  if (stat === undefined || !stat.isFile()) return { ok: true, kind: 'not_inspected' };
+  return classifyOtherFile(readFileSync(join(root, path)));
+}
+
 export interface HistoryViolation {
   commit: string;
   path: string;
@@ -414,11 +587,48 @@ export interface HistoryViolation {
 export interface HistoryScan {
   commits: number;
   blobsChecked: number;
+  /** Distinct blobs outside the three kinds that the line-by-line content check read. */
+  otherBlobsChecked: number;
   violations: HistoryViolation[];
 }
 
 const git = (root: string, args: string[]): Buffer =>
   execFileSync('git', args, { cwd: root, maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] });
+
+/** A blob's bytes; a git failure throws, so the scan fails closed. */
+const readBlob = (root: string, sha: string, path: string, commit: string): Buffer => {
+  try {
+    return git(root, ['cat-file', 'blob', sha]);
+  } catch (e) {
+    throw new Error(`A10 history cannot read blob ${sha} (${JSON.stringify(path)}) of ${commit}: ${(e as Error).message}`);
+  }
+};
+
+/**
+ * The raw capture records in the message of the annotated tag `sha`, and of every tag it points to in turn (a tag of a
+ * tag), found with the content check (rawRecordLine); an object that is not a tag has none. A git failure throws, so the
+ * check fails closed. The hook runs it for every annotated tag it pushes; nothing on GitHub runs it (contract 6.5).
+ */
+export function tagMessageViolations(root: string, sha: string): HistoryViolation[] {
+  const violations: HistoryViolation[] = [];
+  let object = sha;
+  for (let depth = 0; depth < 64; depth++) {
+    let text: string;
+    try {
+      if (git(root, ['cat-file', '-t', object]).toString('utf8').trim() !== 'tag') return violations;
+      text = git(root, ['cat-file', 'tag', object]).toString('utf8');
+    } catch (e) {
+      throw new Error(`A10 cannot read tag object ${object}: ${(e as Error).message}`);
+    }
+    const blank = text.indexOf('\n\n');
+    const line = blank < 0 ? undefined : rawRecordLine(text.slice(blank + 2));
+    if (line !== undefined) violations.push({ commit: object, path: '(tag message)', reason: `line ${line} of the tag message is a raw capture record` });
+    const target = /^object ([0-9a-f]+)$/m.exec(blank < 0 ? text : text.slice(0, blank));
+    if (!target) throw new Error(`A10 cannot read the target of tag object ${object}`);
+    object = target[1]!;
+  }
+  throw new Error(`A10 stopped following tag ${sha}: more than 64 nested tags`);
+}
 
 /**
  * Every commit that `git rev-list <revArgs>` names (for a pull request, `<base>..<head>`), scanned with the same rule as
@@ -427,7 +637,8 @@ const git = (root: string, args: string[]): Buffer =>
  * reported with the commit that brought it into the range. The tree of each commit is scanned whole, so a disallowed file
  * that the base already carried is reported too (with the range's first commit). A git failure, listing the range or
  * reading a blob, throws (the scan fails closed). A covered path that is a symbolic link or a submodule entry is a
- * violation, as in the tree under test.
+ * violation, as in the tree under test. Every other regular file of each commit is checked once per distinct blob with
+ * the line-by-line content check (classifyOtherFile), and each commit's message with the same check.
  */
 export function historyViolations(root: string, revArgs: string[]): HistoryScan {
   let commits: string[];
@@ -437,14 +648,32 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
     throw new Error(`A10 history cannot list the commits of ${revArgs.join(' ')}: ${(e as Error).message}`);
   }
   const seen = new Set<string>();
+  const otherSeen = new Set<string>();
   const violations: HistoryViolation[] = [];
   for (const commit of commits) {
+    // The commit message: a raw capture record pasted into it is published with the commit.
+    let object: string;
+    try {
+      object = git(root, ['cat-file', 'commit', commit]).toString('utf8');
+    } catch (e) {
+      throw new Error(`A10 history cannot read commit ${commit}: ${(e as Error).message}`);
+    }
+    const messageLine = rawRecordLine(object.slice(object.indexOf('\n\n') + 2));
+    if (messageLine !== undefined) violations.push({ commit, path: '(commit message)', reason: `line ${messageLine} of the commit message is a raw capture record` });
     const entries = git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]).toString('utf8').split('\0').filter((e) => e.length > 0);
     for (const entry of entries) {
       const tab = entry.indexOf('\t');
       const [mode, type, sha] = entry.slice(0, tab).split(' ');
       const path = entry.slice(tab + 1);
-      if (hygieneKind(path) === undefined || sha === undefined) continue;
+      if (sha === undefined) continue;
+      if (hygieneKind(path) === undefined) {
+        // Outside the three kinds: only regular files carry content to check (classifyOtherFile), once per blob.
+        if (type !== 'blob' || mode === '120000' || otherSeen.has(sha)) continue;
+        otherSeen.add(sha);
+        const verdict = classifyOtherFile(readBlob(root, sha, path, commit));
+        if (!verdict.ok) violations.push({ commit, path, reason: verdict.reason });
+        continue;
+      }
       const key = `${sha}\0${path}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -460,12 +689,7 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
         violations.push({ commit, path, reason: SYMLINK_REASON });
         continue;
       }
-      let bytes: Buffer;
-      try {
-        bytes = git(root, ['cat-file', 'blob', sha]);
-      } catch (e) {
-        throw new Error(`A10 history cannot read blob ${sha} (${JSON.stringify(path)}) of ${commit}: ${(e as Error).message}`);
-      }
+      const bytes = readBlob(root, sha, path, commit);
       let text: string;
       try {
         text = decodeStrict(bytes);
@@ -477,5 +701,5 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
       if (!verdict.ok) violations.push({ commit, path, reason: verdict.reason });
     }
   }
-  return { commits: commits.length, blobsChecked: seen.size, violations };
+  return { commits: commits.length, blobsChecked: seen.size, otherBlobsChecked: otherSeen.size, violations };
 }
