@@ -51,7 +51,7 @@
 // historyViolations scans every commit of a commit range, so a file added and deleted again inside the range is still
 // found. Both detect; neither prevents anything that has already been pushed (contract section 6.5).
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Ajv2020, type ErrorObject, type ValidateFunction } from 'ajv/dist/2020.js';
@@ -139,17 +139,18 @@ function isRawCaptureRecord(v: Record<string, any>): boolean {
   return (typeof v.type === 'string' && CAPTURE_RECORD_TYPES.has(v.type)) || ('recvWallMs' in v && 'recvMonoNs' in v);
 }
 
-/** Every line terminator of Unicode (CR LF, LF, CR, NEL, LINE SEPARATOR, PARAGRAPH SEPARATOR). */
-const LINE_BREAK = /\r\n|[\n\r\u0085\u2028\u2029]/;
-/** White space and format characters (Unicode Cf: zero-width space, word joiner, byte order mark ...) at either end. */
-const LINE_PADDING = /^[\s\p{Cf}]+|[\s\p{Cf}]+$/gu;
+/** The line breaks the content check splits at: CR LF, LF, CR, VT, FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR. */
+const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
+/** White space, control characters (Unicode Cc: the record separator of a JSON text sequence ...) and format characters
+ * (Unicode Cf: zero-width space, word joiner, byte order mark ...) at either end of a line. */
+const LINE_PADDING = /^[\s\p{Cc}\p{Cf}]+|[\s\p{Cc}\p{Cf}]+$/gu;
 
 /**
  * The 1-based number of the first line of `text` that, trimmed, is a JSON object that is a raw capture record, or
  * undefined. This is the content check applied to every tracked text file the three kinds above do not cover: it finds
- * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). Lines are split at every
- * Unicode line terminator and trimmed of white space and format characters at both ends. It cannot see a record spread
- * over several lines, embedded in other text, compressed, encoded or in a binary file (contract section 6.5).
+ * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). Lines are split at the
+ * line breaks of LINE_BREAK and trimmed of white space, control and format characters at both ends. It cannot see a
+ * record spread over several lines, embedded in other text, compressed, encoded or in a binary file (contract 6.5).
  */
 export function rawRecordLine(text: string): number | undefined {
   const lines = text.split(LINE_BREAK);
@@ -444,6 +445,7 @@ export type HygieneKind = 'capture_dir' | 'normalize_report' | 'jsonl';
 const CAPTURE_DIR_REASON = 'a file under a captures/ or normalized/ directory, which never enter Git, whatever the file';
 const SYMLINK_REASON = 'a symbolic link where the rule allows only a regular file';
 const SUBMODULE_REASON = 'a submodule entry where the rule allows only a regular file';
+const SUBMODULE_ANYWHERE_REASON = 'a submodule entry, whose content lives in another repository, where no layer reads it';
 const NOT_UTF8_REASON = 'bytes that are not UTF-8';
 const MISSING_REASON = 'a tracked path that is missing from the working tree';
 const NOT_FILE_REASON = 'a path that is not a regular file where the rule allows only a regular file';
@@ -559,9 +561,10 @@ export function trackedHygieneFiles(root: string = repoRootPath): string[] {
 }
 
 /**
- * Every tracked regular file the three kinds do not cover, as root-relative paths, for the content check
- * (classifyOtherFile). Symbolic links and submodule entries carry no file content of their own and are skipped here; in
- * a checkout without .git the same fallback walk as trackedHygieneFiles is used.
+ * Every tracked path the three kinds do not cover, as root-relative paths, for classifyOtherPath: regular files and
+ * symbolic links (whose target text git stores as their content) for the content check, and submodule entries, which
+ * are refused anywhere; in a checkout without .git the same fallback walk as trackedHygieneFiles is used, which lists
+ * regular files and symbolic links.
  */
 export function trackedOtherFiles(root: string = repoRootPath): string[] {
   const other = (p: string): boolean => hygieneKind(p) === undefined;
@@ -574,7 +577,7 @@ export function trackedOtherFiles(root: string = repoRootPath): string[] {
     }
     return listing
       .split('\0')
-      .filter((e) => e.startsWith('100'))
+      .filter((e) => e.startsWith('100') || e.startsWith('120000 ') || e.startsWith('160000 '))
       .map((e) => e.slice(e.indexOf('\t') + 1))
       .filter(other)
       .sort();
@@ -585,7 +588,7 @@ export function trackedOtherFiles(root: string = repoRootPath): string[] {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!(dir === root && FALLBACK_SKIP.has(entry.name))) walk(path);
-      } else if (entry.isFile() && other(relative(root, path))) {
+      } else if ((entry.isFile() || entry.isSymbolicLink()) && other(relative(root, path))) {
         found.push(relative(root, path));
       }
     }
@@ -594,10 +597,18 @@ export function trackedOtherFiles(root: string = repoRootPath): string[] {
   return found.sort();
 }
 
-/** The verdict for a tracked file outside the three kinds, read from `root` (see classifyOtherFile). */
+/**
+ * The verdict for a tracked path outside the three kinds, read from `root`: a submodule entry is refused, a symbolic
+ * link's target text and a regular file's bytes get the content check (classifyOtherFile).
+ */
 export function classifyOtherPath(path: string, root: string = repoRootPath): Verdict {
   const stat = lstatSync(join(root, path), { throwIfNoEntry: false });
-  if (stat === undefined || !stat.isFile()) return { ok: true, kind: 'not_inspected' };
+  // A submodule entry is checked out as a directory, or not at all; only then is git asked, so a file costs no git call.
+  if (stat === undefined || stat.isDirectory()) {
+    return existsSync(join(root, '.git')) && isGitlink(root, path) ? fail(SUBMODULE_ANYWHERE_REASON) : { ok: true, kind: 'not_inspected' };
+  }
+  if (stat.isSymbolicLink()) return classifyOtherFile(readlinkSync(join(root, path), { encoding: 'buffer' }));
+  if (!stat.isFile()) return { ok: true, kind: 'not_inspected' };
   return classifyOtherFile(readFileSync(join(root, path)));
 }
 
@@ -696,8 +707,15 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
       const path = entry.slice(tab + 1);
       if (sha === undefined) continue;
       if (hygieneKind(path) === undefined) {
-        // Outside the three kinds: only regular files carry content to check (classifyOtherFile), once per blob.
-        if (type !== 'blob' || mode === '120000' || otherSeen.has(sha)) continue;
+        // Outside the three kinds: a submodule entry is refused anywhere, since its content lives in another repository;
+        // a regular file's or a symbolic link's blob (the link's target text) gets the content check, once per blob.
+        if (type === 'commit') {
+          const key = `${sha}\0${path}`;
+          if (!seen.has(key)) violations.push({ commit, path, reason: SUBMODULE_ANYWHERE_REASON });
+          seen.add(key);
+          continue;
+        }
+        if (type !== 'blob' || otherSeen.has(sha)) continue;
         otherSeen.add(sha);
         const verdict = classifyOtherFile(readBlob(root, sha, path, commit));
         if (!verdict.ok) violations.push({ commit, path, reason: verdict.reason });

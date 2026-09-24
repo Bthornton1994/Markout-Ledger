@@ -203,6 +203,13 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
   if (records[records.length - 1]!.type !== 'manifest_end') return refuse('R1', records.length - 1, 'the stream does not end with manifest_end');
 
   for (const [i, r] of records.entries()) {
+    if (i === 0) continue;
+    // File structure (R1b): a file_end is followed only by the next file's file_start or, in the last file, by
+    // manifest_end, and a file_start only follows a file_end, so no record lies outside the bytes a file hash covers.
+    // Checked before the lifecycle rules, since section 5.10 orders R1b before R10 at the same record.
+    const prev = records[i - 1]!.type;
+    if (prev === 'file_end' && r.type !== 'file_start' && r.type !== 'manifest_end') return refuse('R1b', i, `a ${r.type} record after a file_end, outside every file hash`);
+    if (r.type === 'file_start' && prev !== 'file_end') return refuse('R1b', i, 'a file_start that does not follow a file_end');
     if (pending) {
       if (!(r.type === 'ws_close' && r.detail === pending.expect)) return refuse('R10', i, `the settlement that began at record ${pending.first} is not followed directly by ws_close ${pending.expect}`);
       settle(pending.first, i, pending.detail);
@@ -210,12 +217,6 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       pending = null;
       continue;
     }
-    if (i === 0) continue;
-    // File structure (R1b): a file_end is followed only by the next file's file_start or, in the last file, by
-    // manifest_end, and a file_start only follows a file_end, so no record lies outside the bytes a file hash covers.
-    const prev = records[i - 1]!.type;
-    if (prev === 'file_end' && r.type !== 'file_start' && r.type !== 'manifest_end') return refuse('R1b', i, `a ${r.type} record after a file_end, outside every file hash`);
-    if (r.type === 'file_start' && prev !== 'file_end') return refuse('R1b', i, 'a file_start that does not follow a file_end');
     if (r.type === 'manifest_end') {
       if (sock) return refuse('R10', i, 'the last socket has no terminal record');
       if (prev !== 'file_end') return refuse('R10', i, 'a manifest_end that does not follow the last file_end');
@@ -270,7 +271,14 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
         continue;
       }
       if (p.channel === 'instrument') {
-        const entries = Array.isArray(p.data?.pairs) ? p.data.pairs.filter((x: any) => x?.symbol === S) : [];
+        // A decodable instrument frame whose specification cannot be read refuses the capture (R5, section 8.1): data
+        // that is not an object, or pairs, when present, that is not a list of objects each carrying a string symbol.
+        const data = p.data;
+        const isEntry = (x: any): boolean => typeof x === 'object' && x !== null && !Array.isArray(x) && typeof x.symbol === 'string';
+        if (typeof data !== 'object' || data === null || Array.isArray(data) || (data.pairs !== undefined && !(Array.isArray(data.pairs) && data.pairs.every(isEntry)))) {
+          return refuse('R5', i, `a malformed instrument ${String(p.type)}: its data is not an object, or its pairs is not a list of entries that each carry a string symbol`);
+        }
+        const entries = Array.isArray(data.pairs) ? data.pairs.filter((x: any) => x.symbol === S) : [];
         // An instrument frame lists the selected pair at most once: two entries could disagree (R5, section 8.1).
         if (entries.length > 1) return refuse('R5', i, `an instrument ${String(p.type)} lists ${S} more than once`);
         const pair = entries[0];

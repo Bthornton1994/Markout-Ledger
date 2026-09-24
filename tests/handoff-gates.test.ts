@@ -74,8 +74,24 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
     };
     expect(list(gate, '`git diff --quiet X <that commit> -- ')).toEqual(expected);
     expect(list(prompt, 'git diff --quiet X <the commit you branch from> -- ')).toEqual(expected);
-    expect(gate).toMatch(/PR-0 and PR-1 never change these paths: if a merged PR-0 has changed any of them, the implementer stops and reports/);
+    expect(gate).toMatch(/PR-0 never changes any of these paths\. PR-1 changes only two of them, `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts`, and only to add the A10 extension of the recorded kind/);
+    expect(gate).toMatch(/If a merged PR-0 has changed any of these paths, the implementer stops and reports/);
     expect(row('PA6')).toMatch(/never a path that Gate and sequence step 2 compares/);
+  });
+
+  it('allows PR-1 exactly one change to a compared path, the A10 extension, and every place that asks for it names the same two files', () => {
+    expect(gate).toMatch(/which adds refusals and removes none; PR-1's description lists those changes, and PR-1's own exact-SHA QA covers them/);
+    expect(gate).toMatch(/Once PR-1 has merged, those two paths are compared with PR-1's cleared SHA instead of X/);
+    expect(gate).toMatch(/repeats step 2's content check on that `main` commit against that change's cleared SHA/);
+    expect(row('A10')).toMatch(/PR-1 extends the recorded kind, in `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts` \(the one change to a compared path that Gate and sequence step 2 allows PR-1\)/);
+    expect(handoff).toMatch(/the PR description lists every change to `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts`, the only compared paths PR-1 changes and only for the A10 extension \(Gate and sequence step 2\), for the owner's review; `tests\/a10-history-cli\.ts`, `\.githooks\/pre-push` and `\.github\/workflows\/ci\.yml` are unchanged/);
+    expect(prompt).toMatch(/extend it as A10 says, in tests\/jsonl-policy\.ts and tests\/repository-jsonl\.test\.ts only, adding refusals and removing none \(the only change you make to a path the check of \(2\) compares\)/);
+    expect(contract).toMatch(/PR-1 extends kind \(2\), in `tests\/jsonl-policy\.ts` and `tests\/repository-jsonl\.test\.ts` \(the one change to a compared path that handoff Gate and sequence step 2 allows PR-1\)/);
+    // The wording that asked PR-1 to change other compared paths, or no compared path at all, is gone everywhere.
+    for (const [name, text] of docs) {
+      expect(text, name).not.toMatch(/PR-0 and PR-1 never change these paths/);
+      expect(text, name).not.toMatch(/lists every change to `tests\/jsonl-policy\.ts`, `tests\/a10-history-cli\.ts`/);
+    }
   });
 
   it('needs no change to a compared path from PR-1: engines.node is already the Node version S1 relies on', () => {
@@ -83,8 +99,8 @@ describe('the order from pull request #3 to PR-0 and PR-1 (handoff, Gate and seq
     const lock = JSON.parse(read('package-lock.json')) as { packages: Record<string, { engines?: { node: string } }> };
     expect(pkg.engines.node).toBe('>=22.4');
     expect(lock.packages['']?.engines?.node).toBe('>=22.4');
-    expect(row('S1')).toMatch(/`engines\.node` is already `>=22\.4`, set by pull request #3; PR-1 changes no path Gate and sequence step 2 compares, `package\.json` included/);
-    expect(prompt).toMatch(/engines\.node is already >=22\.4, set by pull request #3; you change no path the check of \(2\) above compares, package\.json included/);
+    expect(row('S1')).toMatch(/`engines\.node` is already `>=22\.4`, set by pull request #3; PR-1 changes no path Gate and sequence step 2 compares, `package\.json` included, other than the A10 extension step 2 allows/);
+    expect(prompt).toMatch(/engines\.node is already >=22\.4, set by pull request #3; you change no path the check of \(2\) above compares, package\.json included, except the A10 extension of item 5/);
     for (const [name, text] of docs) expect(text, name).not.toMatch(/set `?engines\.node`? to/);
   });
 

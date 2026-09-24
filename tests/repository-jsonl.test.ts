@@ -193,7 +193,7 @@ describe('A10 file listing (the tree under test)', () => {
     });
   });
 
-  it('splits lines at every Unicode line terminator and trims format characters, so CR, NEL, U+2028 or a zero-width prefix hides no record', () => {
+  it('splits lines at CR, LF, VT, FF, NEL, U+2028 and U+2029 and trims control and format characters, so none of them hides a record', () => {
     const record = JSON.stringify(captureExamples.message_trade);
     const found = (line: number) => ({ ok: false, reason: `line ${line} is a raw capture record, in a file the fixture rules do not cover` });
     expect(classifyOtherFile(Buffer.from(`a note\r${record}\r`))).toEqual(found(2));
@@ -202,6 +202,11 @@ describe('A10 file listing (the tree under test)', () => {
     expect(classifyOtherFile(Buffer.from(`a note\u2028${record}\u2029after`))).toEqual(found(2));
     expect(classifyOtherFile(Buffer.from(`\u200b${record}\u2060\n`))).toEqual(found(1));
     expect(classifyOtherFile(Buffer.from(`\ufeff${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\f${record}\n`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(`a note\v${record}\n`))).toEqual(found(2));
+    // An RFC 7464 JSON text sequence (each record after a record separator) and a C0 control prefix.
+    expect(classifyOtherFile(Buffer.from(`\x1e${record}\n\x1e${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\n\x01${record}\x00\n`))).toEqual(found(2));
   });
 
   it('refuses a Git LFS pointer, whose content lives in the LFS store outside git, in the tree and in the history', () => {
@@ -217,6 +222,28 @@ describe('A10 file listing (the tree under test)', () => {
     const added = commitAll(root, 'track a capture through Git LFS');
     expect(classifyOtherPath('capture.bin', root)).toEqual({ ok: false, reason });
     expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([{ commit: added, path: 'capture.bin', reason }]);
+  });
+
+  it('checks a symbolic link\'s target text and refuses a submodule entry anywhere, in the tree and in the history', () => {
+    const record = JSON.stringify(captureExamples.message_trade);
+    const found = { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' };
+    const submodule = { ok: false, reason: 'a submodule entry, whose content lives in another repository, where no layer reads it' };
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const base = commitAll(root, 'base');
+    symlinkSync(record, join(root, 'notes.txt'));
+    symlinkSync('README.md', join(root, 'readme-link'));
+    const added = commitAll(root, 'a link whose target is a raw record, and a harmless one');
+    gitIn(root, 'update-index', '--add', '--cacheinfo', `160000,${base},vendor/data`);
+    gitIn(root, 'commit', '-q', '-m', 'a submodule entry at a path no kind covers');
+    const withSubmodule = gitIn(root, 'rev-parse', 'HEAD').trim();
+    expect(trackedOtherFiles(root)).toEqual(expect.arrayContaining(['notes.txt', 'readme-link', 'vendor/data']));
+    expect(classifyOtherPath('notes.txt', root)).toEqual(found);
+    expect(classifyOtherPath('readme-link', root)).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherPath('vendor/data', root)).toEqual(submodule);
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([
+      { commit: added, path: 'notes.txt', reason: found.reason },
+      { commit: withSubmodule, path: 'vendor/data', reason: submodule.reason },
+    ]);
   });
 
   it('documents what the content check cannot see: a record over several lines, inside other text, or compressed', () => {

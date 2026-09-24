@@ -355,6 +355,7 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
   it.each<[string, (t: Tape) => void, RegExp]>([
     ['a record after a file_end that is not the next file_start (outside every file hash)', (t) => { t.subscribedSocket(); t.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) }); t.trade(); t.close('capture_end'); }, /a message record after a file_end, outside every file hash/],
     ['a file_start that does not follow a file_end', (t) => { t.subscribedSocket(); t.push('file_start', { fileIndex: 1, previousFileSha256: '0'.repeat(64) }); t.close('capture_end'); }, /file_start that does not follow a file_end/],
+    ['a file_start between the two records of a settlement (R1b before R10 at the same record, section 5.10)', (t) => { t.subscribedSocket(); t.error('network_error'); t.push('file_start', { fileIndex: 1, previousFileSha256: '0'.repeat(64) }); t.close('network_error'); }, /a file_start that does not follow a file_end/],
     ['a note after the last file_end, before manifest_end (R1b at the note, not R10)', (t) => { t.subscribedSocket(); t.close('capture_end'); t.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) }); t.push('note', { detail: 'late' }); }, /a note record after a file_end, outside every file hash/],
   ])('refuses %s (R1b)', (_name, build, reason) => {
     const t = new Tape();
@@ -689,6 +690,30 @@ describe('M2: every request, response and instrument snapshot matches the select
     const records = same.end();
     schemaValid(records);
     expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R5', at });
+  });
+
+  it('refuses the capture on a malformed instrument frame (R5): data not an object, pairs not a list, or an entry without a string symbol', () => {
+    const payloads = [
+      '{"channel":"instrument","type":"update","data":{"assets":[],"pairs":{"symbol":"BTC/USD","qty_precision":6}}}',
+      '{"channel":"instrument","type":"update","data":{"assets":[],"pairs":["BTC/USD"]}}',
+      '{"channel":"instrument","type":"update","data":{"assets":[],"pairs":[{"symbol":null,"qty_precision":6}]}}',
+      '{"channel":"instrument","type":"update","data":[]}',
+    ];
+    for (const payload of payloads) {
+      const t = new Tape();
+      t.subscribedSocket();
+      const at = t.push('message', { stream: 'instrument', payload });
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      expect(analyzeCapture(records, BTC).refused, payload).toMatchObject({ rule: 'R5', at, reason: expect.stringMatching(/a malformed instrument update/) });
+    }
+    // An update that carries no pairs key (assets only) names no pair and is not malformed.
+    const r = socketWith((t) => {
+      t.subscribedSocket();
+      t.push('message', { stream: 'instrument', payload: '{"channel":"instrument","type":"update","data":{"assets":[]}}' });
+    });
+    expect(r.refused).toBeNull();
   });
 
   it('compares increments by value, not by lexeme', () => {
