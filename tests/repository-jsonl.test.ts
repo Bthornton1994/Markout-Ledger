@@ -687,6 +687,17 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     expect(remoteRef(c.remote, 'main')).not.toBe(bad);
   });
 
+  it('refuses to push an annotated tag whose header carries a raw capture record (a tag object written with hash-object --literally)', () => {
+    const c = hookClone();
+    expect(c.push('origin', 'main')).toBe('');
+    const head = c.hookGit('rev-parse', 'HEAD').trim();
+    const text = [`object ${head}`, 'type commit', 'tag odd', 'tagger a <a@example.invalid> 1791288000 +0000', JSON.stringify(captureExamples.message_trade), '', 'a message', ''].join('\n');
+    const tag = execFileSync('git', ['hash-object', '-t', 'tag', '-w', '--literally', '--stdin'], { cwd: c.root, input: text, encoding: 'utf8', env: GIT_ENV }).trim();
+    c.hookGit('update-ref', 'refs/tags/odd', tag);
+    expect(c.push('origin', 'refs/tags/odd')).toMatch(/\(tag header\): line 5 of the tag header is a raw capture record/);
+    expect(remoteRef(c.remote, 'refs/tags/odd')).toBeUndefined();
+  });
+
   it('refuses the push when it cannot run (no node_modules), rather than letting it through', () => {
     const c = hookClone(false);
     expect(c.push('origin', 'main')).toMatch(/A10 pre-push: node_modules\/\.bin\/tsx is missing/);
@@ -794,6 +805,19 @@ describe('A10 classifier', () => {
       r.rejections.push({ rule: 'R4', scope: 'item', segmentIndex: null, at: { fileIndex: 1, record: 41210 }, field: 'pair' });
     });
     expect(classifyNormalizeReport(outside)).toEqual({ ok: true, kind: 'normalize_report_v1' });
+  });
+
+  it('rejects a run refused at capture level that lists more than one rejection (one R5 per run, or R1b with a later R1)', () => {
+    const base = reportExamples.report_r1_unsupported_version!;
+    const twoR5 = structuredClone(base);
+    twoR5.rejections = [{ rule: 'R5', scope: 'capture', segmentIndex: null, at: null, field: 'qtyDecimals' }, { rule: 'R5', scope: 'capture', segmentIndex: null, at: null, field: 'status' }];
+    expect(classifyNormalizeReport(canonicalReport(twoR5))).toMatchObject({ ok: false, reason: expect.stringMatching(/more than its one rejection/) });
+    const r1bThenR1 = structuredClone(base);
+    r1bThenR1.rejections = [{ rule: 'R1', scope: 'capture', segmentIndex: null, at: { fileIndex: 0, record: 0 }, field: 'captureFormatVersion' }, { rule: 'R1b', scope: 'capture', segmentIndex: null, at: { fileIndex: 0, record: 6 }, field: null }];
+    expect(classifyNormalizeReport(canonicalReport(r1bThenR1))).toMatchObject({ ok: false, reason: expect.stringMatching(/more than its one rejection/) });
+    const r1bPastFileEnd = structuredClone(base);
+    r1bPastFileEnd.rejections = [{ rule: 'R1b', scope: 'capture', segmentIndex: null, at: { fileIndex: 0, record: 6 }, field: null }];
+    expect(classifyNormalizeReport(canonicalReport(r1bPastFileEnd))).toEqual({ ok: true, kind: 'normalize_report_v1' });
   });
 
   it('accepts an R5 refusal naming qtyIncrement, the field of a changed quantity increment', () => {

@@ -2,7 +2,7 @@
 # A10 pre-push check (docs/M2_DATA_CONTRACT.md section 6.5). Opt in once per clone, from the repository root, by copying
 # it into the clone's own hooks directory:
 #
-#   cp .githooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#   cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push"
 #
 # A copy in .git/hooks stays active whatever commit is checked out, and refuses a push from a checkout that lacks the
 # scan (below). `git config core.hooksPath .githooks` also enables it, but that path is resolved against the working
@@ -13,16 +13,16 @@
 # and refuses the push if any of them carries something the rule rejects (any file under a captures/ or normalized/
 # directory at any depth, a normalize report outside its name, closed schema, canonical bytes, order, pairings,
 # cross-references or bounds, an unclassified .jsonl file, or a raw capture record on a line of its own in any other
-# tracked UTF-8 text file, in a commit message or in the message of an annotated tag it pushes), including a file that
-# was added and deleted again before the push; a git notes ref is scanned like any ref, its notes being files of its
-# commits. For a ref the remote already has, it scans the commits between the remote's value and the pushed commit, or
-# every commit reachable from the pushed commit when the remote's value is not in this clone (after a history rewrite,
-# for example); for a new remote ref, every commit reachable from the pushed commit (the clone's remote-tracking refs
-# are not trusted, since they may be stale). It also refuses a pushed ref that does not point, directly or through an
-# annotated tag, at a commit, since a tag on a tree or a blob carries files no commit scan sees. It needs node_modules
-# (npm ci) and the scan in the checked-out tree, and refuses the push when it cannot run, or while the checkout's
-# .githooks/pre-push differs from this copy. Its git commands and the scan ignore replace refs, so they read the objects
-# the push sends.
+# tracked UTF-8 text file, in a commit message or in the message or header of an annotated tag it pushes), including a
+# file that was added and deleted again before the push; a git notes ref is scanned like any ref, its notes being files
+# of its commits. For a ref the remote already has, it scans the commits between the remote's value and the pushed
+# commit, or every commit reachable from the pushed commit when the remote's value is not in this clone (after a history
+# rewrite, for example); for a new remote ref, every commit reachable from the pushed commit (the clone's
+# remote-tracking refs are not trusted, since they may be stale). It also refuses a pushed ref that does not point,
+# directly or through an annotated tag, at a commit, since a tag on a tree or a blob carries files no commit scan sees.
+# It needs node_modules (npm ci) and the scan in the checked-out tree, and refuses the push when it cannot run, or while
+# the checkout's .githooks/pre-push differs from this copy. Its git commands and the scan ignore replace refs, so they
+# read the objects the push sends.
 #
 # It is a local, bypassable control, not a guarantee and not complete prevention: `git push --no-verify`, a clone where
 # it is not installed, an edited or non-executable hook, another git client and an upload through the GitHub web
@@ -34,9 +34,10 @@
 # Every git command below, and the scan's, reads the objects a push sends, never replacements (git replace).
 export GIT_NO_REPLACE_OBJECTS=1
 # An installed copy is frozen when it is copied; when the checkout's own .githooks/pre-push differs from it, the push is
-# refused until the copy is refreshed, so a strengthened hook cannot be left behind.
+# refused until the copy is refreshed from a checkout of the current branch. Only copies that carry this check refuse:
+# a copy of an older .githooks/pre-push, or one made before this check existed, does not, and must be replaced.
 if [ -f .githooks/pre-push ] && ! cmp -s "$0" .githooks/pre-push; then
-  echo "A10 pre-push: this hook ($0) differs from the checkout's .githooks/pre-push; copy it again (cp .githooks/pre-push .git/hooks/pre-push) and push again; refusing the push" >&2
+  echo "A10 pre-push: this hook ($0) differs from the checkout's .githooks/pre-push; copy it again from a checkout of the current branch (cp .githooks/pre-push \"\$(git rev-parse --git-path hooks)/pre-push\") and push again; refusing the push" >&2
   exit 1
 fi
 tsx="node_modules/.bin/tsx"

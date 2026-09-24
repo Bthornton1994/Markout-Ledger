@@ -260,7 +260,8 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
           p.method !== ANSWER[method] ||
           (result.channel !== undefined && result.channel !== channel) ||
           ((channel === 'book' || channel === 'trade') && result.symbol !== undefined && result.symbol !== S) ||
-          (channel === 'book' && result.depth !== undefined && result.depth !== 100);
+          (channel === 'book' && result.depth !== undefined && result.depth !== 100) ||
+          (method === 'subscribe' && result.snapshot !== undefined && result.snapshot !== (channel !== 'trade'));
         if (mismatch) sock.refused ??= `a response to req_id ${p.req_id} that names another method or subscription than its request`;
         else if (p.success === true && method === 'subscribe' && sock.initial.get(channel) === p.req_id) sock.acked.set(channel, i);
         continue;
@@ -282,7 +283,8 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
           sock.instrumentSeen = true;
           // The capture's first instrument snapshot completes the capture-start specification: a missing pair or a
           // status other than online there refuses the capture (R5); any other socket's first snapshot refuses only
-          // that socket (R9).
+          // that socket (R9). A snapshot the tie rule wrote before its socket's instrument_snapshot_timeout still counts
+          // as the capture's first (fail closed), although it satisfies none of its socket's waits.
           const problem = !pair ? `the instrument snapshot has no entry for ${S}` : pair.status !== 'online' ? `the instrument snapshot gives ${S} status ${String(pair.status)}` : null;
           if (problem !== null && !specSeen) return refuse('R5', i, `${problem}, in the capture's first instrument snapshot`);
           specSeen = true;
@@ -356,14 +358,29 @@ export function clockSteps(records: RawRecord[]): number[] {
   return steps;
 }
 
-/** An RFC 3339 instant as integer microseconds since the epoch (digits beyond the microsecond dropped), or undefined. */
+/**
+ * An RFC 3339 date-time as integer microseconds since the epoch (fraction digits beyond the microsecond dropped), or
+ * undefined for anything else (section 5.6): upper-case T and Z only, a real calendar date, hour 00-23, minute and
+ * second 00-59 (a leap second, :60, is no sample: the venue's leap-second convention is unknown), and an offset of Z or
+ * +-HH:MM with HH 00-23 and MM 00-59.
+ */
 export function rfc3339Micros(text: unknown): bigint | undefined {
   if (typeof text !== 'string') return undefined;
-  const m = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(text);
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):(\d{2}))$/.exec(text);
   if (!m) return undefined;
-  const ms = Date.parse(`${m[1]}${m[3]}`);
-  if (!Number.isFinite(ms)) return undefined;
-  return BigInt(ms) * 1000n + BigInt((m[2] ?? '').padEnd(6, '0').slice(0, 6));
+  const [y, mo, d, h, mi, se] = m.slice(1, 7).map(Number) as [number, number, number, number, number, number];
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  if (days === undefined || d < 1 || d > days || h > 23 || mi > 59 || se > 59) return undefined;
+  let offsetMin = 0;
+  if (m[8] !== undefined) {
+    const oh = Number(m[9]);
+    const om = Number(m[10]);
+    if (oh > 23 || om > 59) return undefined;
+    offsetMin = (m[8] === '-' ? -1 : 1) * (oh * 60 + om);
+  }
+  const ms = Date.UTC(y, mo - 1, d, h, mi, se) - offsetMin * 60_000;
+  return BigInt(ms) * 1000n + BigInt((m[7] ?? '').padEnd(6, '0').slice(0, 6));
 }
 
 /** The unixtime of a usable REST Time probe (its payload's error array is empty and result.unixtime is an integer). */
@@ -391,12 +408,12 @@ export const PROBE_LOOKBACK_NS = 900_000_000_000n;
 /**
  * The clock samples a segment owns (section 5.6). `start` is the segment's first record as section 5.10 defines it (the
  * record of its first event). Its clock epoch starts at the last clock step at or before `start` (record 0 when there
- * is none); a segment never contains a later step, since a step cuts it (R3). It owns: every usable method response
- * (both time_in and time_out RFC 3339 instants) that is the first response to a request of the segment's own socket
- * and has the method that answers it, with the request record and the response record both at or after the later of
- * that socket's ws_open and the epoch start and at or before the segment's end record (so the three acknowledgements
- * of the socket's subscriptions, which always precede its gate, count for every segment of that socket in the same
- * epoch); and every usable REST probe (an empty error array and an integer result.unixtime) whose record lies in the
+ * is none); a segment with an event never contains a step after its start, since a step cuts it (R3). It owns: every
+ * usable method response (both time_in and time_out RFC 3339 instants) that is the first response to a request of the
+ * segment's own socket and has the method that answers it, with the request record and the response record both at or
+ * after the later of that socket's ws_open and the epoch start and at or before the segment's end record (so each
+ * acknowledgement of the socket's initial subscriptions, which precede its gate, counts for every segment of that
+ * socket whose epoch starts at or before its subscribe record); and every usable REST probe (an empty error array and an integer result.unixtime) whose record lies in the
  * epoch at or before the end record, whose send clock, after a step, is not before the step's record, and which was
  * received no more than 15 minutes before `start`. Three or more millisecond samples give source ws_method_response;
  * otherwise one or more probes give rest_time; otherwise none (R2b refuses the segment).

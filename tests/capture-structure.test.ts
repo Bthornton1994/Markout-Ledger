@@ -2,6 +2,7 @@
 // tests/capture-structure.ts. Every record is built from the constructed examples of schemas/examples and must be valid
 // against schemas/capture-record.v1.schema.json, so each vector is a raw stream the runner could write. The values are
 // invented for the tests; none is venue data. PR-1's normalizer must reach the same verdicts (handoff A7(r)).
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
@@ -65,11 +66,13 @@ class Tape {
     this.push('ping', { request: JSON.stringify({ method: 'ping', req_id: reqId }) });
     return reqId;
   }
-  ack(reqId: number, channel: Channel, opts: { symbol?: string | null; depth?: number; success?: boolean; timed?: boolean } = {}): number {
+  ack(reqId: number, channel: Channel, opts: { symbol?: string | null; depth?: number; success?: boolean; timed?: boolean; snapshot?: boolean; times?: [string, string] } = {}): number {
     const result: Record<string, unknown> = { channel };
     if (channel === 'book') result.depth = opts.depth ?? 100;
     if (channel !== 'instrument' && opts.symbol !== null) result.symbol = opts.symbol ?? 'BTC/USD';
-    const times = opts.timed === false ? {} : { time_in: '2026-10-06T12:00:00.100000Z', time_out: '2026-10-06T12:00:00.100050Z' };
+    if (opts.snapshot !== undefined) result.snapshot = opts.snapshot;
+    const [tin, tout] = opts.times ?? ['2026-10-06T12:00:00.100000Z', '2026-10-06T12:00:00.100050Z'];
+    const times = opts.timed === false ? {} : { time_in: tin, time_out: tout };
     return this.push('message', { stream: 'method:subscribe', payload: JSON.stringify({ method: 'subscribe', req_id: reqId, result, success: opts.success ?? true, ...times }) });
   }
   pong(reqId: number, timed = false): number {
@@ -114,11 +117,39 @@ class Tape {
   request(type: 'subscribe' | 'unsubscribe' | 'ping', text: string): number {
     return this.push(type, { request: text });
   }
+  /** Closes the current raw file and opens the next (file_end, then file_start); end() fills in their values. */
+  rotate(): this {
+    this.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) });
+    this.push('file_start', { fileIndex: 1, previousFileSha256: '0'.repeat(64) });
+    return this;
+  }
+  /**
+   * Ends the stream with file_end and manifest_end, then fills in every file record from the records actually written:
+   * each file is one JSON.stringify(record) + '\n' line per record, a file_end's sha256 is the SHA-256 of its file's
+   * bytes before it and its records their count, a file_start names the previous file's hash, and manifest_end lists
+   * every file and counts the records by type. So a normalizer's R1b hash checks pass on every vector.
+   */
   end(): RawRecord[] {
-    const { type: _t, recvWallMs: _w, recvMonoNs: _m, ...fe } = structuredClone(examples.file_end);
-    this.push('file_end', { ...fe, records: this.records.length });
+    this.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) });
     const { type: _t2, recvWallMs: _w2, recvMonoNs: _m2, ...me } = structuredClone(examples.manifest_end);
     this.push('manifest_end', me);
+    const files: { fileIndex: number; sha256: string; records: number }[] = [];
+    let lines: string[] = [];
+    const counts: Record<string, number> = {};
+    for (const r of this.records) {
+      if (r.type === 'manifest_end') break;
+      counts[r.type] = (counts[r.type] ?? 0) + 1;
+      if (r.type === 'file_end') {
+        const sha256 = createHash('sha256').update(lines.join('')).digest('hex');
+        Object.assign(r, { fileIndex: files.length, records: lines.length, sha256 });
+        files.push({ fileIndex: files.length, sha256, records: lines.length });
+        lines = [];
+        continue;
+      }
+      if (r.type === 'file_start') Object.assign(r, { fileIndex: Math.max(files.length, 1), previousFileSha256: files[files.length - 1]?.sha256 ?? '0'.repeat(64) });
+      lines.push(JSON.stringify(r) + '\n');
+    }
+    Object.assign(this.records[this.records.length - 1]!, { files, counts });
     return this.records;
   }
 }
@@ -222,6 +253,8 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
     const records = t.end();
     schemaValid(records);
     const r = analyzeCapture(records, BTC);
+    // The instrument snapshot before the timeout still counts as the capture's first (online here), so no R5.
+    expect(r.refused).toBeNull();
     expect(r.sockets[0]).toMatchObject({ refused: `settled by ${detail}`, window: null });
     expect(r.fixtureEligible).toBe(false);
   });
@@ -243,7 +276,7 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
 
   it.each<[string, (t: Tape) => void, RegExp]>([
     ['a second record the table does not pair with the first', (t) => { t.subscribedSocket(); t.error('network_error'); t.close('liveness_timeout'); }, /not followed directly by ws_close network_error/],
-    ['a file rotation inside a two-record settlement', (t) => { t.subscribedSocket(); t.error('subscribe_rejected'); t.push('file_end', { fileIndex: 0, records: 99, sha256: 'b'.repeat(64) }); t.close('subscribe_rejected'); }, /not followed directly/],
+    ['a file rotation inside a two-record settlement', (t) => { t.subscribedSocket(); t.error('subscribe_rejected'); t.rotate(); t.close('subscribe_rejected'); }, /not followed directly/],
     ['a message between a settlement and the next ws_open', (t) => { t.subscribedSocket(); t.close('liveness_timeout'); t.trade(); t.subscribedSocket(); t.close('capture_end'); }, /message record outside an open socket/],
     ['a request before any socket opens', (t) => { t.sub('book'); t.subscribedSocket(); t.close('capture_end'); }, /subscribe record outside an open socket/],
     ['a ws_open after the capture ended', (t) => { t.subscribedSocket(); t.close('capture_end'); t.open(); }, /ws_open record after the capture ended/],
@@ -283,8 +316,9 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
   });
 
   it.each<[string, (t: Tape) => void, RegExp]>([
-    ['a record after a file_end that is not the next file_start (outside every file hash)', (t) => { t.subscribedSocket(); t.push('file_end', { fileIndex: 0, records: 12, sha256: 'b'.repeat(64) }); t.trade(); t.close('capture_end'); }, /a message record after a file_end, outside every file hash/],
-    ['a file_start that does not follow a file_end', (t) => { t.subscribedSocket(); t.push('file_start', { fileIndex: 1, previousFileSha256: 'b'.repeat(64) }); t.close('capture_end'); }, /file_start that does not follow a file_end/],
+    ['a record after a file_end that is not the next file_start (outside every file hash)', (t) => { t.subscribedSocket(); t.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) }); t.trade(); t.close('capture_end'); }, /a message record after a file_end, outside every file hash/],
+    ['a file_start that does not follow a file_end', (t) => { t.subscribedSocket(); t.push('file_start', { fileIndex: 1, previousFileSha256: '0'.repeat(64) }); t.close('capture_end'); }, /file_start that does not follow a file_end/],
+    ['a note after the last file_end, before manifest_end (R1b at the note, not R10)', (t) => { t.subscribedSocket(); t.close('capture_end'); t.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) }); t.push('note', { detail: 'late' }); }, /a note record after a file_end, outside every file hash/],
   ])('refuses %s (R1b)', (_name, build, reason) => {
     const t = new Tape();
     build(t);
@@ -296,13 +330,32 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
   it('accepts a file rotation between sockets and inside a socket, outside any settlement', () => {
     const t = new Tape();
     t.subscribedSocket();
-    t.push('file_end', { fileIndex: 0, records: 11, sha256: 'b'.repeat(64) });
-    t.push('file_start', { fileIndex: 1, previousFileSha256: 'b'.repeat(64) });
+    t.rotate();
     t.trade();
     t.close('capture_end');
     const records = t.end();
     schemaValid(records);
     expect(analyzeCapture(records, BTC)).toMatchObject({ refused: null, fixtureEligible: true });
+  });
+
+  it('writes vectors whose file hashes are real: each file_end hashes its file\'s lines, so a normalizer\'s R1b hash checks pass', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    t.rotate();
+    t.trade();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const text = records.map((r) => JSON.stringify(r) + '\n');
+    const ends = records.flatMap((r, i) => (r.type === 'file_end' ? [i] : []));
+    expect(ends).toHaveLength(2);
+    const file0 = text.slice(0, ends[0]).join('');
+    const file1 = text.slice(ends[0]! + 1, ends[1]).join('');
+    const sha = (x: string): string => createHash('sha256').update(x).digest('hex');
+    expect(records[ends[0]!]).toMatchObject({ fileIndex: 0, records: ends[0], sha256: sha(file0) });
+    expect(records[ends[0]! + 1]).toMatchObject({ type: 'file_start', fileIndex: 1, previousFileSha256: sha(file0) });
+    expect(records[ends[1]!]).toMatchObject({ fileIndex: 1, records: ends[1]! - ends[0]! - 1, sha256: sha(file1) });
+    expect(records[records.length - 1]).toMatchObject({ files: [{ fileIndex: 0, sha256: sha(file0) }, { fileIndex: 1, sha256: sha(file1) }] });
   });
 
   it('accepts a failed attempt that never opened, followed by a reconnection that qualifies', () => {
@@ -482,6 +535,46 @@ describe('M2: every request, response and instrument snapshot matches the select
     }
   });
 
+  it('counts a snapshot the tie rule wrote before instrument_snapshot_timeout as the capture\'s first (R5 when it is not online)', () => {
+    const r = socketWith((t) => {
+      t.open();
+      for (const c of ['book', 'trade', 'instrument'] as Channel[]) t.ack(t.sub(c), c);
+      t.book('snapshot');
+      t.instrument('snapshot', { status: 'cancel_only' });
+      t.close('instrument_snapshot_timeout');
+      t.subscribedSocket();
+    });
+    expect(r.refused).toMatchObject({ rule: 'R5', reason: expect.stringMatching(/status cancel_only, in the capture's first instrument snapshot/) });
+  });
+
+  it('refuses the capture when the capture\'s first snapshot arrives on a later socket and is not online, though a third socket qualifies (R5)', () => {
+    const r = socketWith((t) => {
+      t.open();
+      for (const c of ['book', 'trade', 'instrument'] as Channel[]) t.ack(t.sub(c), c);
+      t.close('instrument_snapshot_timeout');
+      t.open();
+      for (const c of ['book', 'trade', 'instrument'] as Channel[]) t.ack(t.sub(c), c);
+      t.instrument('snapshot', { status: 'maintenance' });
+      t.close('liveness_timeout');
+      t.subscribedSocket();
+    });
+    expect(r.refused).toMatchObject({ rule: 'R5', reason: expect.stringMatching(/status maintenance, in the capture's first instrument snapshot/) });
+    expect(r.fixtureEligible).toBe(false);
+  });
+
+  it('compares a snapshot echo too: true on book and instrument acknowledgements, false on trade; an absent echo is no mismatch', () => {
+    const build = (snap: { book?: boolean; trade?: boolean; instrument?: boolean }) => socketWith((t) => {
+      t.open();
+      const [book, trade, instr] = [t.sub('book'), t.sub('trade'), t.sub('instrument')];
+      t.ack(book, 'book', snap.book === undefined ? {} : { snapshot: snap.book });
+      t.ack(trade, 'trade', snap.trade === undefined ? {} : { snapshot: snap.trade });
+      t.ack(instr, 'instrument', snap.instrument === undefined ? {} : { snapshot: snap.instrument });
+      t.instrument();
+    });
+    expect(build({ book: true, trade: false, instrument: true }).sockets[0]!.refused).toBeNull();
+    for (const bad of [{ book: false }, { trade: true }, { instrument: false }]) expect(build(bad).sockets[0]!.refused).toMatch(/names another method or subscription/);
+  });
+
   it('when the first socket delivers no instrument snapshot, the reconnection\'s snapshot is the capture\'s first', () => {
     const r = socketWith((t) => {
       t.open();
@@ -636,6 +729,31 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     // 130 ms and answered at base + 140 ms with venue times 30 s later: ((30000000 - 130000) + (30000020 - 140000)) / 2
     // = 29865010 us. The second smallest of the four is 45025 us (the third, 55025, would be the upper middle).
     expect(clockEstimate(records, owned)).toMatchObject({ samples: 4, medianMs: '45.025', maxAbsMs: '29865.010' });
+  });
+
+  it('truncates each offset toward zero: a floor, ceil or rounding division gives other values', () => {
+    const run = (times: [string, string]) => {
+      const t = new Tape();
+      t.open();
+      const ids = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, t.sub(c)] as const);
+      for (const [c, id] of ids) t.ack(id, c, { times });
+      t.instrument();
+      t.book('snapshot');
+      const first = t.book();
+      t.close('capture_end');
+      const records = t.end();
+      return clockEstimate(records, ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, first, first));
+    };
+    // Sums of -89997, -109997 and -129997 us: halves of -44998.5, -54998.5 and -64998.5 truncate toward zero.
+    expect(run(['2026-10-06T12:00:00.000001Z', '2026-10-06T12:00:00.000002Z'])).toEqual({ samples: 3, medianMs: '-54.998', medianRttMs: '29.999', maxAbsMs: '64.998', resolutionMs: 1, source: 'ws_method_response' });
+    // Sums of 110051, 90051 and 70051 us: halves of 55025.5, 45025.5 and 35025.5 truncate down.
+    expect(run(['2026-10-06T12:00:00.100001Z', '2026-10-06T12:00:00.100050Z'])).toEqual({ samples: 3, medianMs: '45.025', medianRttMs: '29.951', maxAbsMs: '55.025', resolutionMs: 1, source: 'ws_method_response' });
+  });
+
+  it('counts only real calendar instants in the upper-case RFC 3339 form: no impossible date, hour 24, leap second or lower-case t and z', () => {
+    for (const bad of ['2026-02-30T12:00:00.100000Z', '2026-10-06T24:00:00Z', '2016-12-31T23:59:60Z', '2026-10-06t12:00:00z', '2026-10-06T12:00:00+24:00', '2026-10-06T12:60:00Z']) expect(rfc3339Micros(bad), bad).toBeUndefined();
+    expect(rfc3339Micros('2024-02-29T00:00:00Z')).toBe(BigInt(Date.UTC(2024, 1, 29)) * 1000n);
+    expect(rfc3339Micros('2026-10-06T14:00:00.000001+02:00')).toBe(1791288000000001n);
   });
 
   it('owns no sample of another socket and none after its own end record', () => {

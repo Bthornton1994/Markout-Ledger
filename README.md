@@ -25,7 +25,7 @@ Requires Node.js >= 22.
 
 ```bash
 npm install
-cp .githooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push   # optional: the opt-in, bypassable A10 pre-push check (docs/M2_DATA_CONTRACT.md section 6.5)
+cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push"   # optional: the opt-in, bypassable A10 pre-push check; re-copy whenever .githooks/pre-push changes (docs/M2_DATA_CONTRACT.md section 6.5)
 npm run typecheck      # tsc --noEmit
 npm test               # vitest, behavioural tests (includes the schema tests)
 npm run test:schemas   # JSON Schema validation only: schemas/ against schemas/examples/ and failure cases

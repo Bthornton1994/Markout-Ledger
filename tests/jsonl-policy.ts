@@ -307,7 +307,8 @@ function unsafeNumber(value: unknown): number | undefined {
  * 5.10 and 6.5, or undefined. Order and naming: every number a safe integer; raw files and segments numbered from 0 in
  * order; cuts and each dropped entry's records in strictly ascending raw-record order (so no record twice, and no more
  * records than the count); rejections strictly ascending by (at, segmentIndex, rule, field); supersedes by
- * segmentIndex; each fixtureFile naming its own capture and segment; each rule with its one scope and its own fields
+ * segmentIndex; a run refused at capture level listing exactly one rejection; each fixtureFile naming its own capture
+ * and segment; each rule with its one scope and its own fields
  * (R3, a cut, is never a rejection); a segment rejection naming the rule its segment names; too_short exactly under R7.
  * Cross-references: every raw record reference inside the listed raw files (at most one record past a file's
  * file_end, the record R1b names when one follows it, or in the last file its manifest_end); segments in raw order, each start not after its end, without
@@ -321,6 +322,7 @@ function unsafeNumber(value: unknown): number | undefined {
 function reportViolation(r: Record<string, any>): string | undefined {
   const unsafe = unsafeNumber(r);
   if (unsafe !== undefined) return `a number (${String(unsafe)}) that is not a safe integer`;
+  if (r.rejections.some((j: any) => j.scope === 'capture') && r.rejections.length !== 1) return 'a run refused at capture level that lists more than its one rejection';
   if (!r.rawFiles.every((f: any, i: number) => f.fileIndex === i)) return 'rawFiles not numbered 0, 1, 2, ... in order';
   if (!r.segments.every((s: any, i: number) => s.segmentIndex === i)) return 'segments not numbered 0, 1, 2, ... in order';
   const misnamed = r.segments.find((s: any) => s.fixtureFile !== null && s.fixtureFile !== `${r.captureId}-seg${s.segmentIndex}.jsonl`);
@@ -613,8 +615,8 @@ const readBlob = (root: string, sha: string, path: string, commit: string): Buff
 };
 
 /**
- * The raw capture records in the message of the annotated tag `sha`, and of every tag it points to in turn (a tag of a
- * tag), found with the content check (rawRecordLine); an object that is not a tag has none. A git failure throws, so the
+ * The raw capture records in the message and header of the annotated tag `sha`, and of every tag it points to in turn
+ * (a tag of a tag), found with the content check (rawRecordLine); an object that is not a tag has none. A git failure throws, so the
  * check fails closed. The hook runs it for every annotated tag it pushes; nothing on GitHub runs it (contract 6.5).
  */
 export function tagMessageViolations(root: string, sha: string): HistoryViolation[] {
@@ -631,6 +633,8 @@ export function tagMessageViolations(root: string, sha: string): HistoryViolatio
     const blank = text.indexOf('\n\n');
     const line = blank < 0 ? undefined : rawRecordLine(text.slice(blank + 2));
     if (line !== undefined) violations.push({ commit: object, path: '(tag message)', reason: `line ${line} of the tag message is a raw capture record` });
+    const headerLine = rawRecordLine(blank < 0 ? text : text.slice(0, blank));
+    if (headerLine !== undefined) violations.push({ commit: object, path: '(tag header)', reason: `line ${headerLine} of the tag header is a raw capture record` });
     const target = /^object ([0-9a-f]+)$/m.exec(blank < 0 ? text : text.slice(0, blank));
     if (!target) throw new Error(`A10 cannot read the target of tag object ${object}`);
     object = target[1]!;
