@@ -4,8 +4,11 @@
 // cannot classify fails. The rule covers three kinds of path:
 //
 //   any path under a directory named captures/ or    never allowed, whatever the file (both directories are the
-//   normalized/, at the root or at any depth         default output of the capture and normalize tools and .gitignore
-//                                                    ignores them at any depth; a file there enters Git only by force)
+//   normalized/, at the root or at any depth         default output of the capture and normalize tools; .gitignore
+//                                                    ignores them at any depth in lower case only, and keeps a file
+//                                                    there out of a plain git add, not out of a commit: git add -f,
+//                                                    git mv, git apply --index, git am or a .gitignore negation stage
+//                                                    one, so the path is refused in any letter case)
 //   a name ending in .normalize-report.json          must be named <captureId>.normalize-report.json for the captureId
 //                                                    it carries and validate against the closed
 //                                                    schemas/normalize-report.v1.schema.json (contract section 5.10);
@@ -27,7 +30,8 @@
 //                             "sample_permitted" (the schema then requires a non-blank terms URL, check date, checker
 //                             and note), whose every following line matches $defs/event, and whose eventCount matches.
 //
-// Every other .jsonl file fails: a raw capture record on any line, invalid JSON, a line that is not a JSON object, a
+// Every other .jsonl file fails: a raw capture record on any line (or, in a recorded fixture, nested at any depth under
+// any key of the header or an event), invalid JSON, a line that is not a JSON object, a
 // first line that is not a fixture header (unwrapped venue frames, headerless events or objects), a version-1 header
 // that is not synthetic, a version-2 synthetic header (the synthetic generator writes version 1), a recorded fixture
 // without that rights shape, any other schema version, and an empty file. Names are matched in any letter case. A
@@ -36,13 +40,14 @@
 // The check is structural. It cannot see whether a rights note's attestation exists or clears its scope (the owner
 // verifies that by hand); whether a file declared synthetic is in fact synthetic (recorded observations re-encoded in
 // the version-1 format and labelled synthetic pass kind synthetic_v1); a venue payload pasted into a string value of
-// either fixture kind, or into an open object of a recorded fixture; a recorded value encoded into a normalize report's
+// either fixture kind, or under an undeclared key of a recorded fixture (unless it is a whole raw capture record); a recorded value encoded into a normalize report's
 // constrained values (an integer in any integer field, the number of entries in an array, the choice among the
 // enumerated codes a value may take or between null and a value, bytes hex-encoded into a hash, UUID, commit or
 // version string, whether supersedes is present or empty, and the directory and number of committed reports). Every
 // other tracked text file, and every commit message and header and annotated tag message the history scan and the hook
 // read, gets only a content check (rawRecordLine): a raw capture record on a line of its own is found under any name,
-// but not one spread over several lines, embedded in other text, encoded, compressed or in a file that is not UTF-8
+// also block-quoted, after a trailer token, with a trailing comma or in a one-line JSON array, but not one spread over
+// several lines, embedded in other text in any other way, encoded, compressed or in a file that is not UTF-8
 // text, and no other form of recorded data (a recorded fixture or unwrapped venue frames under another name, a report
 // under a name not ending in .normalize-report.json, exports of recorded values, values in names or identity fields).
 // A tracked Git LFS pointer is refused, since its content lives outside git. Review remains the control for the rest.
@@ -139,37 +144,83 @@ function isRawCaptureRecord(v: Record<string, any>): boolean {
   return (typeof v.type === 'string' && CAPTURE_RECORD_TYPES.has(v.type)) || ('recvWallMs' in v && 'recvMonoNs' in v);
 }
 
-/** The line breaks the content check splits at: CR LF, LF, CR, VT, FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR. */
-const LINE_BREAK = /\r\n|[\n\r\v\f\u0085\u2028\u2029]/;
-/** White space, control characters (Unicode Cc: the record separator of a JSON text sequence ...) and format characters
- * (Unicode Cf: zero-width space, word joiner, byte order mark ...) at either end of a line. */
-const LINE_PADDING = /^[\s\p{Cc}\p{Cf}]+|[\s\p{Cc}\p{Cf}]+$/gu;
+/** Whether a JSON value is, or holds at any depth, an object that is a raw capture record (walked iteratively, so a deeply
+ * nested value cannot overflow the stack). */
+function nestsRawRecord(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (Array.isArray(v)) for (const x of v) stack.push(x);
+    else if (isObject(v)) {
+      if (isRawCaptureRecord(v)) return true;
+      for (const x of Object.values(v)) stack.push(x);
+    }
+  }
+  return false;
+}
+
+/** The line breaks that end a line: CR LF, LF and CR. JSON permits none of them unescaped inside a string. */
+const LINE_BREAK = /\r\n|[\n\r]/;
+/** The further breaks a line is also split at: VT, FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR. JSON permits NEL,
+ * U+2028 and U+2029 unescaped inside a string, so a line is also tried whole, before and apart from these parts. */
+const PART_BREAK = /[\v\f\u0085\u2028\u2029]/;
+/** White space, control characters (Unicode Cc: the record separator of a JSON text sequence ...), format characters
+ * (Unicode Cf: zero-width space, word joiner, byte order mark ...) and marks (Unicode M: combining grapheme joiner,
+ * variation selectors ...) at either end of a line or part. The trailing run may start only after a character outside
+ * the class, so a long run of padding inside a line costs linear time, not quadratic. */
+const LINE_PADDING = /^[\s\p{Cc}\p{Cf}\p{M}]+|(?<![\s\p{Cc}\p{Cf}\p{M}])[\s\p{Cc}\p{Cf}\p{M}]+$/gu;
+
+/** A markdown block quote's markers (`> `, `> > `) and a git trailer's token (`Raw-Record: `: a letter or digit, then
+ * letters, digits and hyphens, a colon and white space) at the start of a line. */
+const QUOTE_MARKERS = /^(?:>[ \t]*)+/;
+const TRAILER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9-]*:\s+/;
+
+/** Whether `text` is a JSON object that is a raw capture record, or a JSON array with one among its elements. */
+function holdsRawRecord(text: string): boolean {
+  if (!(text.startsWith('{') && text.endsWith('}')) && !(text.startsWith('[') && text.endsWith(']'))) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  return Array.isArray(value) ? value.some((e) => isObject(e) && isRawCaptureRecord(e)) : isObject(value) && isRawCaptureRecord(value);
+}
 
 /**
- * The 1-based number of the first line of `text` that, trimmed, is a JSON object that is a raw capture record, or
- * undefined. This is the content check applied to every tracked text file the three kinds above do not cover: it finds
- * a raw capture written one record per line under any name (.ndjson, .txt, .log, .json ...). Lines are split at the
- * line breaks of LINE_BREAK and trimmed of white space, control and format characters at both ends. It cannot see a
- * record spread over several lines, embedded in other text, compressed, encoded or in a binary file (contract 6.5).
+ * Whether `text`, trimmed of LINE_PADDING, holds a raw capture record: as it stands, after a markdown block quote's
+ * markers, or after a trailer token as well, each also without one trailing comma, as a JSON object that is a raw
+ * capture record or a JSON array with one among its elements.
+ */
+function isRawRecordText(text: string): boolean {
+  const line = text.replace(LINE_PADDING, '');
+  const unquoted = line.replace(QUOTE_MARKERS, '').replace(LINE_PADDING, '');
+  const forms = [line, unquoted, unquoted.replace(TRAILER_TOKEN, '').replace(LINE_PADDING, '')];
+  return forms.flatMap((f) => (f.endsWith(',') ? [f, f.slice(0, -1).replace(LINE_PADDING, '')] : [f])).some(holdsRawRecord);
+}
+
+/**
+ * The 1-based number of the first line of `text` that holds a raw capture record, or undefined. This is the content
+ * check applied to every tracked text file the three kinds above do not cover: it finds a raw capture written one record
+ * per line under any name (.ndjson, .txt, .log, .json ...). Lines end at CR LF, LF or CR. Each line is tried whole, so a
+ * record whose string values hold NEL, U+2028 or U+2029 is still found, and each part of it between the further breaks
+ * of PART_BREAK is tried too; each is trimmed of white space, control and format characters and marks at both ends
+ * first, and tried as it stands, block-quoted, after a trailer token, with a trailing comma, and as a one-line JSON
+ * array (isRawRecordText). It cannot see a record spread over several lines, embedded in other text in any other way,
+ * compressed, encoded or in a binary file (contract 6.5).
  */
 export function rawRecordLine(text: string): number | undefined {
-  const lines = text.split(LINE_BREAK);
-  for (const [i, raw] of lines.entries()) {
-    const line = raw.replace(LINE_PADDING, '');
-    if (!line.startsWith('{') || !line.endsWith('}')) continue;
-    let value: unknown;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (isObject(value) && isRawCaptureRecord(value)) return i + 1;
+  for (const [i, line] of text.split(LINE_BREAK).entries()) {
+    if (isRawRecordText(line)) return i + 1;
+    const parts = line.split(PART_BREAK);
+    if (parts.length > 1 && parts.some(isRawRecordText)) return i + 1;
   }
   return undefined;
 }
 
-/** The first line of a Git LFS pointer file (the LFS specification's version URL, current and legacy). */
-const LFS_POINTER = /^version https:\/\/(git-lfs|hawser)\.github\.com\/spec\/v1\r?\n/;
+/** The first line of a Git LFS pointer file (the LFS specification's version URL, current and legacy), after any leading
+ * white space (NEL included, which JavaScript's \s omits), which git-lfs trims before it decodes a pointer. */
+const LFS_POINTER = /^[\s\x85]*version https:\/\/(git-lfs|hawser)\.github\.com\/spec\/v1\r?\n/;
 
 /** The verdict for a tracked file outside the three kinds: a Git LFS pointer is refused, since its content lives in the
  * LFS store outside git, where no layer reads it; other text is checked for raw capture record lines; bytes that are not
@@ -183,7 +234,7 @@ export function classifyOtherFile(bytes: Uint8Array): Verdict {
   }
   if (LFS_POINTER.test(text)) return fail('a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it');
   const line = rawRecordLine(text);
-  return line === undefined ? { ok: true, kind: 'other_text' } : fail(`line ${line} is a raw capture record, in a file the fixture rules do not cover`);
+  return line === undefined ? { ok: true, kind: 'other_text' } : fail(`line ${line} holds a raw capture record, in a file the fixture rules do not cover`);
 }
 
 export function classifyJsonl(text: string): Verdict {
@@ -251,6 +302,10 @@ function classifyRecordedV2(header: Record<string, any>, events: Record<string, 
   for (const [i, event] of events.entries()) {
     if (!v2Event(event)) return fail(`event ${i + 1} does not match fixture.v2 $defs/event: ${firstError(v2Event.errors)}`);
   }
+  // Every object of a recorded fixture accepts undeclared keys (contract section 6), so a whole raw capture record could
+  // ride under one; the byte-for-byte check of PR-1's extension does not close the header, which the engine keeps as parsed.
+  const nested = [header, ...events].findIndex((v) => Object.values(v).some(nestsRawRecord));
+  if (nested >= 0) return fail(`non-blank line ${nested + 1} carries a raw capture record nested under one of its keys`);
   if (header.eventCount !== events.length) {
     return fail(`the header's eventCount ${String(header.eventCount)} does not match the ${events.length} events present`);
   }
@@ -655,9 +710,9 @@ export function tagMessageViolations(root: string, sha: string): HistoryViolatio
     }
     const blank = text.indexOf('\n\n');
     const line = blank < 0 ? undefined : rawRecordLine(text.slice(blank + 2));
-    if (line !== undefined) violations.push({ commit: object, path: '(tag message)', reason: `line ${line} of the tag message is a raw capture record` });
+    if (line !== undefined) violations.push({ commit: object, path: '(tag message)', reason: `line ${line} of the tag message holds a raw capture record` });
     const headerLine = rawRecordLine(blank < 0 ? text : text.slice(0, blank));
-    if (headerLine !== undefined) violations.push({ commit: object, path: '(tag header)', reason: `line ${headerLine} of the tag header is a raw capture record` });
+    if (headerLine !== undefined) violations.push({ commit: object, path: '(tag header)', reason: `line ${headerLine} of the tag header holds a raw capture record` });
     const target = /^object ([0-9a-f]+)$/m.exec(blank < 0 ? text : text.slice(0, blank));
     if (!target) throw new Error(`A10 cannot read the target of tag object ${object}`);
     object = target[1]!;
@@ -695,11 +750,11 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
     }
     const blank = object.indexOf('\n\n');
     const messageLine = blank < 0 ? undefined : rawRecordLine(object.slice(blank + 2));
-    if (messageLine !== undefined) violations.push({ commit, path: '(commit message)', reason: `line ${messageLine} of the commit message is a raw capture record` });
+    if (messageLine !== undefined) violations.push({ commit, path: '(commit message)', reason: `line ${messageLine} of the commit message holds a raw capture record` });
     // The header too: merging a signed tag copies the tag, its message included, into a mergetag header whose
     // continuation lines start with a space (rawRecordLine trims them).
     const headerLine = rawRecordLine(blank < 0 ? object : object.slice(0, blank));
-    if (headerLine !== undefined) violations.push({ commit, path: '(commit header)', reason: `line ${headerLine} of the commit header (a mergetag, for example) is a raw capture record` });
+    if (headerLine !== undefined) violations.push({ commit, path: '(commit header)', reason: `line ${headerLine} of the commit header (a mergetag, for example) holds a raw capture record` });
     const entries = git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]).toString('utf8').split('\0').filter((e) => e.length > 0);
     for (const entry of entries) {
       const tab = entry.indexOf('\t');

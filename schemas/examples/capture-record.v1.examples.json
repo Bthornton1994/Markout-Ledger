@@ -47,7 +47,7 @@
       "recvMonoNs": "10400000000000",
       "endedAtIso": "2026-10-06T13:30:00.000Z",
       "clock": { "source": "chrony", "report": "<verbatim chronyc tracking output>", "offsetMs": -0.27, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T13:29:59.900Z" },
-      "counts": { "manifest_start": 1, "file_start": 1, "ws_open": 1, "subscribe": 3, "ping": 180, "message": 187001, "probe": 9, "file_end": 2 },
+      "counts": { "manifest_start": 1, "file_start": 1, "ws_open": 1, "ws_close": 1, "subscribe": 3, "ping": 180, "message": 187000, "probe": 9, "file_end": 2 },
       "files": [
         { "fileIndex": 0, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "records": 120000 },
         { "fileIndex": 1, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "records": 67196 }

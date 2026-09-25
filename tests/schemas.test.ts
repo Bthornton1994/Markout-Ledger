@@ -571,6 +571,44 @@ describe('fixture.v2 schema', () => {
       expected: [{ instancePath: '/provenance/capture/endReason', keyword: 'enum' }],
     },
     {
+      name: 'a cut reason outside the contract list',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'venue_said_so', fileIndex: 0, record: 1 }]),
+      expected: [{ instancePath: '/provenance/capture/cuts/0/reason', keyword: 'enum' }],
+    },
+    {
+      name: 'a planned end listed as a cut (it ends a segment without being one)',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'capture_end', fileIndex: 0, record: 1 }]),
+      expected: [{ instancePath: '/provenance/capture/cuts/0/reason', keyword: 'enum' }],
+    },
+    {
+      name: 'a capture id that is not a UUID (format and the version-4 pattern)',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.captureId = 'capture-1'),
+      expected: [
+        { instancePath: '/provenance/capture/captureId', keyword: 'pattern' },
+        { instancePath: '/provenance/capture/captureId', keyword: 'format', params: { format: 'uuid' } },
+      ],
+    },
+    {
+      name: 'a capture id in upper case',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.captureId = d.provenance.capture.captureId.toUpperCase()),
+      expected: [{ instancePath: '/provenance/capture/captureId', keyword: 'pattern' }],
+    },
+    {
+      name: 'a capture id that is a UUID of another version (v1)',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.captureId = '123e4567-e89b-12d3-a456-426614174000'),
+      expected: [{ instancePath: '/provenance/capture/captureId', keyword: 'pattern' }],
+    },
+    {
       name: 'a capture block without the visible span',
       from: 'header_recorded_qty8',
       target: fixtureHeader,
@@ -680,6 +718,8 @@ describe('normalize-report.v1 schema (closed: the data boundary of the report, c
     { name: 'a fixture hash written as text', from: 'report_segments', mutate: (d) => (d.segments[0].fixtureSha256 = 'bid 62710.4'), expected: [{ instancePath: '/segments/0/fixtureSha256', keyword: 'pattern' }, { instancePath: '/segments/0/fixtureSha256', keyword: 'pattern' }] },
     { name: 'a fixture file name that is not <captureId>-seg<n>.jsonl', from: 'report_segments', mutate: (d) => (d.segments[0].fixtureFile = '62710.4.jsonl'), expected: [{ instancePath: '/segments/0/fixtureFile', keyword: 'pattern' }, { instancePath: '/segments/0/fixtureFile', keyword: 'pattern' }] },
     { name: 'a capture identifier with a urn prefix and upper case', from: 'report_segments', mutate: (d) => (d.captureId = 'URN:UUID:123E4567-E89B-42D3-A456-426614174000'), expected: [{ instancePath: '/captureId', keyword: 'pattern' }] },
+    { name: 'a capture identifier that is an upper-case UUID (lower case only, contract section 3)', from: 'report_segments', mutate: (d) => (d.captureId = '123E4567-E89B-42D3-A456-426614174000'), expected: [{ instancePath: '/captureId', keyword: 'pattern' }] },
+    { name: 'a capture identifier that is a UUID of another version (version 4 only)', from: 'report_segments', mutate: (d) => (d.captureId = '123e4567-e89b-12d3-a456-426614174000'), expected: [{ instancePath: '/captureId', keyword: 'pattern' }] },
     { name: 'a normalizer name carrying JSON', from: 'report_segments', mutate: (d) => (d.normalizer.name = 'kraken {"a":1}'), expected: [{ instancePath: '/normalizer/name', keyword: 'const' }] },
     { name: 'an adapter name carrying a price in a name-shaped token', from: 'report_segments', mutate: (d) => (d.adapter.name = 'kraken-spot-ws2/bid-62710-4'), expected: [{ instancePath: '/adapter/name', keyword: 'const' }] },
     { name: 'a normalizer name carrying a trade id in a name-shaped token', from: 'report_segments', mutate: (d) => (d.normalizer.name = 'trade-id-81234567-market-buy'), expected: [{ instancePath: '/normalizer/name', keyword: 'const' }] },
@@ -792,6 +832,44 @@ describe('the contract text and the schemas agree (docs/M2_DATA_CONTRACT.md)', (
   it('the rules of section 5.9 are exactly the report schema rules', () => {
     const rules = [...contract.matchAll(/^\| (R[0-9]+b?) \|/gm)].map((m) => m[1]!);
     expect(rules).toEqual(reportSchema.$defs.rule.enum);
+  });
+
+  it('the fixture header and the report name the same cut reasons, and a segment ends at one of them or at capture_end (section 5.8)', () => {
+    const fixtureSchema = readJson(FIXTURE_SCHEMA) as Json;
+    const capture = fixtureSchema.$defs.capture.properties;
+    const cutReasons = reportSchema.$defs.cutReason.enum as string[];
+    expect(sorted(capture.cuts.items.properties.reason.enum as string[])).toEqual(sorted(cutReasons));
+    expect(sorted(capture.endReason.enum as string[])).toEqual(sorted([...cutReasons, 'capture_end']));
+  });
+
+  it('the manifest_end example counts what section 4.1 says it counts (N12)', () => {
+    // counts: records by type over every record before manifest_end, so not itself; files[].records: the records
+    // before each file's file_end; file 0 opens with manifest_start and every later file with file_start.
+    const end = captureExamples.manifest_end!;
+    const counts = end.counts as Record<string, number>;
+    const files = end.files as { fileIndex: number; records: number }[];
+    expect(Object.keys(counts)).not.toContain('manifest_end');
+    expect(counts.manifest_start).toBe(1);
+    expect(counts.file_end).toBe(files.length);
+    expect(counts.file_start).toBe(files.length - 1);
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    expect(total - counts.file_end!).toBe(files.reduce((a, f) => a + f.records, 0));
+    // The example's one socket ends at the planned end, so it is closed by ws_close detail capture_end (section 8.1).
+    expect(counts.ws_close).toBe(counts.ws_open);
+  });
+
+  it('the first recorded fixture example is a segment of the capture the raw-record examples describe (N12)', () => {
+    for (const name of ['header_recorded_qty8', 'header_recorded_qty6']) {
+      expect(fixtureExamples[name]!.provenance.capture.normalizer.name, name).toBe(reportSchema.properties.normalizer.properties.name.const);
+    }
+    const segment = fixtureExamples.header_recorded_qty8!.provenance.capture;
+    expect(segment.captureId).toBe(captureExamples.manifest_start!.captureId);
+    expect(segment.rawFiles).toEqual(captureExamples.manifest_end!.files);
+    // A planned end writes ws_close detail capture_end, then file_end (section 2), so ws_close is the last record
+    // before the last file's file_end and the segment ends at the record before it (section 5.8).
+    const last = segment.rawFiles[segment.rawFiles.length - 1];
+    expect(segment.endReason).toBe('capture_end');
+    expect(segment.endRawRecord).toEqual({ fileIndex: last.fileIndex, record: last.records - 2 });
   });
 
   it('the report counts records under exactly the record types of the raw-record schema', () => {

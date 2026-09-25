@@ -5,7 +5,9 @@
 // It is an executable specification for pull request PR-1, not a normalizer: it reconstructs no book, verifies no
 // checksum and emits no event. It reads raw capture records (schemas/capture-record.v1.schema.json) that are already
 // parsed, in stream order across files. The normalizer of PR-1 must reach the same verdicts on every vector of
-// tests/capture-structure.test.ts (handoff A7(r)); where the two disagree, the contract decides and both are corrected.
+// tests/capture-structure.test.ts (handoff A7(r)); where the two disagree, the contract decides which is wrong: a wrong
+// normalizer is corrected in PR-1, and a wrong reference, vector or contract text in its own documents pull request
+// under handoff Gate and sequence step 3a, never in PR-1 (docs/M2_DATA_CONTRACT.md section 5.11).
 
 export interface RawRecord {
   type: string;
@@ -218,6 +220,8 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       continue;
     }
     if (r.type === 'manifest_end') {
+      // A last socket with no terminal record is a condition of the whole stream (section 5.10 step (3)), reported at
+      // the manifest_end record, as section 5.10 says; the checks after the loop cannot be reached while R1 holds.
       if (sock) return refuse('R10', i, 'the last socket has no terminal record');
       if (prev !== 'file_end') return refuse('R10', i, 'a manifest_end that does not follow the last file_end');
       if (i !== records.length - 1) return refuse('R10', i, 'records follow manifest_end');
@@ -290,7 +294,8 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
         }
         if (p.type === 'snapshot') {
           if (sock.instrumentSeen) {
-            // A socket's instrument subscription yields one snapshot; a later one must still carry the pair.
+            // A socket's instrument subscription yields one snapshot; a later one must still carry the pair, and its status
+            // is not compared (section 8.1): a change it shows is recorded in venueStatus, not refused.
             if (!pair) return refuse('R5', i, `a later instrument snapshot has no entry for ${S}`);
             continue;
           }
@@ -402,11 +407,46 @@ export function rfc3339Micros(text: unknown): bigint | undefined {
   return BigInt(ms) * 1000n + BigInt((m[7] ?? '').padEnd(6, '0').slice(0, 6));
 }
 
-/** The unixtime of a usable REST Time probe (its payload's error array is empty and result.unixtime is an integer). */
+/**
+ * The integer a JSON number lexeme denotes, read from its digits and never through a float, when it is an integer of
+ * magnitude at most 2^53 - 1 however written ("1791288001", "1791288001.0" and "1.791288001e9" alike), or undefined
+ * ("1791288000.9999999999999999", "1791288001.5", "9007199254740992").
+ */
+function exactSafeInteger(lexeme: string): number | undefined {
+  const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(lexeme);
+  if (!m) return undefined;
+  const [, sign, int = '', frac = '', exp = '0'] = m;
+  const digits = (int + frac).replace(/^0+/, '');
+  const significant = digits.replace(/0+$/, '');
+  if (significant === '') return 0;
+  // The value is significant * 10^scale; an integer needs scale >= 0, and a safe one at most 16 digits.
+  const scale = Number(exp) - frac.length + (digits.length - significant.length);
+  if (scale < 0 || significant.length + scale > 16) return undefined;
+  const n = Number(significant + '0'.repeat(scale));
+  return Number.isSafeInteger(n) ? (sign === '-' ? -n : n) : undefined;
+}
+
+/** A JSON number's source lexeme, kept by a reviver; JSON text cannot produce an instance of this class. */
+class NumberLexeme {
+  constructor(readonly text: string) {}
+}
+
+/**
+ * The unixtime of a usable REST Time probe (section 5.6): its payload's error array is empty and result.unixtime is a
+ * JSON number whose exact value is an integer of magnitude at most 2^53 - 1, however it is written.
+ */
 function probeUnixtime(r: RawRecord): number | undefined {
-  const p = parsePayload(r.payload);
+  if (typeof r.payload !== 'string') return undefined;
+  let p: any;
+  try {
+    const reviver = (key: string, value: unknown, context?: { source?: string }): unknown =>
+      key === 'unixtime' && typeof value === 'number' && context?.source !== undefined ? new NumberLexeme(context.source) : value;
+    p = JSON.parse(r.payload, reviver as (key: string, value: unknown) => unknown);
+  } catch {
+    return undefined;
+  }
   const t = p?.result?.unixtime;
-  return Array.isArray(p?.error) && p.error.length === 0 && Number.isSafeInteger(t) ? t : undefined;
+  return Array.isArray(p?.error) && p.error.length === 0 && t instanceof NumberLexeme ? exactSafeInteger(t.text) : undefined;
 }
 
 export interface OwnedSamples {
@@ -432,7 +472,7 @@ export const PROBE_LOOKBACK_NS = 900_000_000_000n;
  * segment's own socket and has the method that answers it, with the request record and the response record both at or
  * after the later of that socket's ws_open and the epoch start and at or before the segment's end record (so each
  * acknowledgement of the socket's initial subscriptions, which precede its gate, counts for every segment of that
- * socket whose epoch starts at or before its subscribe record); and every usable REST probe (an empty error array and an integer result.unixtime) whose record lies in the
+ * socket whose epoch starts at or before its subscribe record); and every usable REST probe (an empty error array and a result.unixtime whose exact value is a safe integer, however it is written) whose record lies in the
  * epoch at or before the end record, whose send clock, after a step, is not before the step's record, and which was
  * received no more than 15 minutes before `start`. Three or more millisecond samples give source ws_method_response;
  * otherwise one or more probes give rest_time; otherwise none (R2b refuses the segment).

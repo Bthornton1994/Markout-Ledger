@@ -2,12 +2,16 @@
 // tests/capture-structure.ts. Every record is built from the constructed examples of schemas/examples and must be valid
 // against schemas/capture-record.v1.schema.json, so each vector is a raw stream the runner could write. The values are
 // invented for the tests; none is venue data. PR-1's normalizer must reach the same verdicts (handoff A7(r)).
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
-import { describe, expect, it } from 'vitest';
-import { analyzeCapture, canonicalDecimal, clockEstimate, clockSteps, ownedClockSamples, rfc3339Micros, type RawRecord, type SelectedInstrument } from './capture-structure.js';
+import { afterAll, describe, expect, it } from 'vitest';
+import { analyzeCapture as analyzeCaptureReference, canonicalDecimal, clockEstimate, clockSteps, ownedClockSamples, rfc3339Micros, type RawRecord, type SelectedInstrument } from './capture-structure.js';
 
 const addFormats = addFormatsModule.default;
 const repoRoot = new URL('../', import.meta.url);
@@ -16,6 +20,45 @@ const ajv = new Ajv2020({ strict: true, allErrors: true });
 addFormats(ajv, ['date', 'date-time', 'uuid']);
 const captureRecord = ajv.compile(readJson('schemas/capture-record.v1.schema.json'));
 const examples = readJson('schemas/examples/capture-record.v1.examples.json').examples;
+
+/**
+ * Every raw stream a vector gives the reference, in order, for handoff A7(r). PR-1 changes neither this file nor
+ * tests/capture-structure.ts (contract section 5.11), so its test takes the streams from here: run with
+ * CAPTURE_VECTORS_OUT set to a directory outside the repository, this file writes there, once its vectors have run, one
+ * `<n>.jsonl` per stream (one JSON.stringify(record) plus '\n' per record, in stream order: its raw files one after
+ * another, each ending with its `file_end`) and `vectors.json`, which lists each file with the test that built it and the
+ * selected instrument the reference judged it for. The streams are constructed, not venue data, but they are raw capture
+ * records, which A10 refuses in the tree, so a directory inside the repository is refused.
+ */
+const judged: { test: string; instrument: SelectedInstrument; records: RawRecord[] }[] = [];
+const analyzeCapture = (records: RawRecord[], instrument: SelectedInstrument): ReturnType<typeof analyzeCaptureReference> => {
+  judged.push({ test: expect.getState().currentTestName ?? '', instrument: structuredClone(instrument), records: structuredClone(records) });
+  return analyzeCaptureReference(records, instrument);
+};
+const repoRootPath = fileURLToPath(repoRoot);
+/** `path` with its longest existing prefix resolved through symbolic links, so a link into the repository is seen as such. */
+const realPath = (path: string): string => {
+  let head = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(head)) {
+    rest.unshift(basename(head));
+    head = dirname(head);
+  }
+  return join(realpathSync(head), ...rest);
+};
+afterAll(() => {
+  const out = process.env.CAPTURE_VECTORS_OUT;
+  if (!out) return;
+  const rel = relative(realpathSync(repoRootPath), realPath(out));
+  if (!(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))) throw new Error(`CAPTURE_VECTORS_OUT must be outside the repository: ${out}`);
+  mkdirSync(out, { recursive: true });
+  const index = judged.map((v, k) => {
+    const file = `${String(k).padStart(3, '0')}.jsonl`;
+    writeFileSync(join(out, file), v.records.map((r) => JSON.stringify(r) + '\n').join(''));
+    return { file, test: v.test, instrument: v.instrument };
+  });
+  writeFileSync(join(out, 'vectors.json'), JSON.stringify(index, null, 2) + '\n');
+});
 
 const BTC: SelectedInstrument = { symbol: 'BTC/USD', pricePrecision: 1, qtyPrecision: 8, priceIncrement: '0.1', qtyIncrement: '0.00000001' };
 type Channel = 'book' | 'trade' | 'instrument';
@@ -299,6 +342,19 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
     const r = analyzeCapture(records, BTC);
     expect(r.refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(reason) });
     expect(r.fixtureEligible).toBe(false);
+  });
+
+  it('reports a last socket with no terminal record at the manifest_end record (R10, section 5.10), with or without a last file_end', () => {
+    for (const fileEnd of [true, false]) {
+      const t = new Tape();
+      t.subscribedSocket();
+      const records = t.end({ fileEnd });
+      schemaValid(records);
+      expect(records[records.length - 1]!.type).toBe('manifest_end');
+      // Without a file_end the manifest_end also breaks a record rule of step (2); both are R10 at that record, so only
+      // the rule and the record are compared (handoff A7(r)), not which reason the reference names.
+      expect(analyzeCapture(records, BTC).refused).toMatchObject(fileEnd ? { rule: 'R10', at: records.length - 1, reason: expect.stringMatching(/last socket has no terminal record/) } : { rule: 'R10', at: records.length - 1 });
+    }
   });
 
   it('refuses a manifest_end that does not directly follow the last file_end (R10), with real hashes so step (1) passes', () => {
@@ -660,6 +716,21 @@ describe('M2: every request, response and instrument snapshot matches the select
     expect(r.refused).toMatchObject({ rule: 'R5', reason: expect.stringMatching(/later instrument snapshot has no entry/) });
   });
 
+  it('neither refuses nor cuts at a later instrument snapshot on the same socket whose status is not online (its status is not compared, section 8.1)', () => {
+    let later = -1;
+    let trade = -1;
+    const r = socketWith((t) => {
+      t.subscribedSocket();
+      later = t.instrument('snapshot', { status: 'maintenance' });
+      trade = t.trade();
+    });
+    expect(r.refused).toBeNull();
+    expect(r.sockets[0]!.refused).toBeNull();
+    expect(inWindow(r, later)).toBe(true);
+    expect(inWindow(r, trade)).toBe(true);
+    expect(r.fixtureEligible).toBe(true);
+  });
+
   it('refuses the whole capture when any instrument frame changes the precision or an increment (R5)', () => {
     for (const [type, pair] of [['snapshot', { qtyPrecision: 6 }], ['snapshot', { qtyIncrement: '0.000001' }], ['update', { priceIncrement: '0.01' }]] as const) {
       const r = socketWith((t) => {
@@ -846,6 +917,127 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     expect(rfc3339Micros('0001-02-29T00:00:00Z')).toBeUndefined();
   });
 
+  it('owns a probe received exactly 15 minutes before the segment start, not one received 1 ns earlier, measured from the start record', () => {
+    for (const early of [0n, 1n]) {
+      const t = new Tape();
+      const probe = t.probe();
+      // subscribedSocket writes its update, the segment start, as its tenth record: 900000 ms after the probe.
+      t.advance(900_000 - 100);
+      const b = t.subscribedSocket({ timed: false });
+      const end = t.book();
+      t.close('capture_end');
+      const r0 = t.records[probe]!;
+      r0.recvMonoNs = String(BigInt(r0.recvMonoNs) - early);
+      r0.sentMonoNs = String(BigInt(r0.sentMonoNs as string) - early);
+      const records = t.end();
+      schemaValid(records);
+      expect(BigInt(records[b.update]!.recvMonoNs) - BigInt(records[probe]!.recvMonoNs)).toBe(900_000_000_000n + early);
+      const owned = ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, b.update, end);
+      expect(owned).toMatchObject(early === 0n ? { rest: [probe], source: 'rest_time' } : { rest: [], source: 'none' });
+    }
+  });
+
+  it('owns, after a step, a probe sent exactly at the step record, and a request that is the step record, but not a probe sent 1 ns before it', () => {
+    for (const early of [0n, 1n]) {
+      const t = new Tape();
+      t.subscribedSocket({ timed: false });
+      t.stepWall(500);
+      const reqId = t.ping(); // the step record is itself a request
+      const step = t.records.length - 1;
+      const pong = t.pong(reqId, true);
+      const probe = t.probe(20); // sent 20 ms before its record: exactly the step record's monotonic clock
+      const pr = t.records[probe]!;
+      pr.sentMonoNs = String(BigInt(pr.sentMonoNs as string) - early);
+      const start = t.book();
+      const end = t.book();
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      expect(clockSteps(records)).toEqual([step]);
+      expect(BigInt(records[probe]!.sentMonoNs as string)).toBe(BigInt(records[step]!.recvMonoNs) - early);
+      const owned = ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, start, end);
+      expect(owned).toMatchObject({ epoch: step, ws: [pong], wsRequests: [step], rest: early === 0n ? [probe] : [] });
+    }
+  });
+
+  it('owns a probe that is itself the step record when its send clock equals that record\'s (a zero round trip)', () => {
+    const t = new Tape();
+    t.subscribedSocket({ timed: false });
+    t.stepWall(500);
+    const step = t.probe(0);
+    const end = t.book();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    expect(clockSteps(records)).toEqual([step]);
+    expect(ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, step, end)).toMatchObject({ epoch: step, rest: [step], source: 'rest_time' });
+  });
+
+  it('owns a sample at the segment end record: a pong and a probe that are the end record count', () => {
+    const t = new Tape();
+    const a = t.subscribedSocket({ timed: false });
+    t.pong(t.ping(), true);
+    t.pong(t.ping(), true);
+    const p = t.ping();
+    const lastPong = t.pong(p, true);
+    const probe = t.probe();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const r = analyzeCapture(records, BTC);
+    expect(ownedClockSamples(records, r.sockets[0]!, a.update, lastPong)).toMatchObject({ source: 'ws_method_response' });
+    expect(ownedClockSamples(records, r.sockets[0]!, a.update, lastPong).ws).toContain(lastPong);
+    expect(ownedClockSamples(records, r.sockets[0]!, a.update, probe).rest).toEqual([probe]);
+  });
+
+  it('needs at least three millisecond samples: two give the probe estimate, or none without a probe', () => {
+    for (const withProbe of [true, false]) {
+      const t = new Tape();
+      if (withProbe) t.probe();
+      const a = t.subscribedSocket({ timed: false });
+      t.pong(t.ping(), true);
+      t.pong(t.ping(), true);
+      const end = t.book();
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      const owned = ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, a.update, end);
+      expect(owned.ws).toHaveLength(2);
+      expect(owned.source).toBe(withProbe ? 'rest_time' : 'none');
+    }
+  });
+
+  it('drops fraction digits beyond the microsecond without rounding, and needs upper-case T and Z each on its own; offsets up to 23:59', () => {
+    expect(rfc3339Micros('2026-10-06T12:00:00.1000509Z')).toBe(1791288000100050n);
+    expect(rfc3339Micros('2026-10-06T12:00:00.999999999Z')).toBe(1791288000999999n);
+    for (const bad of ['2026-10-06t12:00:00Z', '2026-10-06T12:00:00z']) expect(rfc3339Micros(bad), bad).toBeUndefined();
+    expect(rfc3339Micros('2026-10-06T12:00:00+23:59')).toBe(1791288000000000n - 86_340_000_000n);
+    expect(rfc3339Micros('2026-10-06T12:00:00-00:59')).toBe(1791288000000000n + 3_540_000_000n);
+    expect(rfc3339Micros('2026-10-06T12:00:00+00:60')).toBeUndefined();
+  });
+
+  it('carries the RFC 3339 boundary forms in a stream, so the vectors hand them to a normalizer: long fractions and offsets count, the others do not', () => {
+    const t = new Tape();
+    const a = t.subscribedSocket({ timed: false });
+    const pong = (timeIn: string, timeOut: string): number => {
+      const reqId = t.ping();
+      return t.push('message', { stream: 'method:pong', payload: JSON.stringify({ method: 'pong', req_id: reqId, time_in: timeIn, time_out: timeOut }) });
+    };
+    const usable = [
+      pong('2026-10-06T12:00:30.0000009Z', '2026-10-06T12:00:30.0000209Z'),
+      pong('2026-10-06T12:00:30.000000999Z', '2026-10-06T12:00:30.000020999Z'),
+      pong('2026-10-07T11:59:30+23:59', '2026-10-06T11:01:30.000020-00:59'),
+    ];
+    for (const bad of ['2026-10-06t12:00:30Z', '2026-10-06T12:00:30z', '2026-10-06T12:00:30.0000000001Z', '2026-10-06T12:00:30+0000', '2026-10-07T12:00:30+24:00', '2016-12-31T23:59:60Z']) pong(bad, bad);
+    const end = t.book();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const owned = ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, a.update, end);
+    expect(owned).toMatchObject({ ws: usable, source: 'ws_method_response' });
+    expect(clockEstimate(records, owned)).toEqual({ samples: 3, medianMs: '29845.010', medianRttMs: '9.980', maxAbsMs: '29865.010', resolutionMs: 1, source: 'ws_method_response' });
+  });
+
   it('owns no sample of another socket and none after its own end record', () => {
     const t = new Tape();
     t.subscribedSocket({ timed: true });
@@ -876,6 +1068,32 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     expect(owned).toEqual({ epoch: 0, ws: [], wsRequests: [], rest: [probe], source: 'rest_time' });
     // t1 = t2 = base + 1500000 us (the middle of the reported second); offset ((1500000 + 20000) + (1500000 - 20000)) / 2.
     expect(clockEstimate(records, owned)).toEqual({ samples: 1, medianMs: '1500.000', medianRttMs: '40.000', maxAbsMs: '1500.000', resolutionMs: 1000, source: 'rest_time' });
+  });
+
+  it('reads result.unixtime by its exact value, never through a float: an integer however written counts, a value that is not a safe integer does not', () => {
+    /** The median offset the probe gives, or null when it is no sample. */
+    const medianMs = (lexeme: string): string | null => {
+      const t = new Tape();
+      t.probe(40, `{"error":[],"result":{"unixtime":${lexeme},"rfc1123":"Tue, 06 Oct 26 12:00:01 +0000"}}`);
+      const a = t.subscribedSocket({ timed: false });
+      const end = t.book();
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      const owned = ownedClockSamples(records, analyzeCapture(records, BTC).sockets[0]!, a.update, end);
+      return owned.source === 'rest_time' ? clockEstimate(records, owned)!.medianMs : null;
+    };
+    /** The offset of section 5.6 for a unixtime of `value`: the middle of that second minus the probe's midpoint, 1791288000000000 us. */
+    const expected = (value: bigint): string => {
+      const us = value * 1_000_000n + 500_000n - 1_791_288_000_000_000n;
+      const abs = us < 0n ? -us : us;
+      return `${us < 0n ? '-' : ''}${abs / 1000n}.${String(abs % 1000n).padStart(3, '0')}`;
+    };
+    for (const lexeme of ['1791288001', '1791288001.0', '1.791288001e9', '17912880010e-1']) expect(medianMs(lexeme), lexeme).toBe('1500.000');
+    for (const [lexeme, value] of [['0', 0n], ['-0', 0n], ['0.0e5', 0n], ['-1', -1n], ['9007199254740991', 9007199254740991n], ['-9007199254740991', -9007199254740991n]] as const) {
+      expect(medianMs(lexeme), lexeme).toBe(expected(value));
+    }
+    for (const lexeme of ['1791288000.9999999999999999', '1791288001.00000001', '1791288001.5', '9007199254740992', '9007199254740993', '-9007199254740992', '1e400', '"1791288001"']) expect(medianMs(lexeme), lexeme).toBeNull();
   });
 
   it('counts no unusable sample: a probe whose payload is an error, and a response whose time_in is not an RFC 3339 instant', () => {
@@ -989,5 +1207,38 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     const r = analyzeCapture(records, BTC);
     expect(ownedClockSamples(records, r.sockets[0]!, step, end)).toMatchObject({ epoch: step, rest: [], source: 'none' });
     expect(() => ownedClockSamples(records, r.sockets[0]!, a.update, end)).toThrow(/never spans a clock step/);
+  });
+});
+
+describe('the vector streams, for PR-1 (handoff A7(r))', () => {
+  it.skipIf(process.env.CAPTURE_VECTORS_OUT !== undefined)('writes every stream the reference judges when CAPTURE_VECTORS_OUT names a directory outside the repository', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-vectors-'));
+    try {
+      const out = join(dir, 'streams');
+      const vitest = join(repoRootPath, 'node_modules', '.bin', 'vitest');
+      const run = (target: string): void => {
+        execFileSync(vitest, ['run', 'tests/capture-structure.test.ts', '-t', 'refuses a second manifest_start'], { cwd: repoRootPath, env: { ...process.env, CAPTURE_VECTORS_OUT: target }, stdio: 'pipe' });
+      };
+      run(out);
+      const index = JSON.parse(readFileSync(join(out, 'vectors.json'), 'utf8')) as { file: string; test: string; instrument: SelectedInstrument }[];
+      expect(index).toEqual([{ file: '000.jsonl', test: expect.stringMatching(/refuses a second manifest_start/), instrument: BTC }]);
+      const text = readFileSync(join(out, '000.jsonl'), 'utf8');
+      const records = text.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l) as RawRecord);
+      expect(records.map((r) => JSON.stringify(r) + '\n').join('')).toBe(text);
+      schemaValid(records);
+      expect(analyzeCaptureReference(records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/a second manifest_start/) });
+      // A directory inside the repository is refused, whatever its name or the link that leads to it, and nothing is
+      // written: the streams are raw capture records, which A10 refuses in the tree.
+      const link = join(dir, 'link-to-repo');
+      symlinkSync(repoRootPath, link);
+      for (const inside of [join(repoRootPath, 'out', 'vectors'), join(repoRootPath, '..vectors'), join(link, 'vectors-via-link')]) {
+        expect(() => run(inside), inside).toThrow();
+      }
+      expect(existsSync(join(repoRootPath, 'out', 'vectors'))).toBe(false);
+      expect(existsSync(join(repoRootPath, '..vectors'))).toBe(false);
+      expect(existsSync(join(repoRootPath, 'vectors-via-link'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

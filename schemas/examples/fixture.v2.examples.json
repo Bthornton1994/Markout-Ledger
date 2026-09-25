@@ -49,9 +49,9 @@
           "segmentIndex": 0,
           "startReason": "capture_start",
           "endReason": "capture_end",
-          "endRawRecord": { "fileIndex": 1, "record": 67190 },
+          "endRawRecord": { "fileIndex": 1, "record": 67194 },
           "capturer": { "name": "markout-ledger/capture", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
-          "normalizer": { "name": "markout-ledger/normalize", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "normalizer": { "name": "markout-ledger", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
           "adapter": { "name": "kraken-spot-ws2", "version": "1" },
           "clockSync": "synchronized",
           "clockReports": {
@@ -127,7 +127,7 @@
           "endReason": "checksum_mismatch",
           "endRawRecord": { "fileIndex": 0, "record": 59990 },
           "capturer": { "name": "markout-ledger/capture", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
-          "normalizer": { "name": "markout-ledger/normalize", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+          "normalizer": { "name": "markout-ledger", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
           "adapter": { "name": "kraken-spot-ws2", "version": "1" },
           "clockSync": "synchronized",
           "clockReports": {

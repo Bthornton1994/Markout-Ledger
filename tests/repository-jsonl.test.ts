@@ -140,6 +140,11 @@ const commitAll = (root: string, message: string): string => {
   return gitIn(root, 'rev-parse', 'HEAD').trim();
 };
 const raw = jsonl([captureExamples.manifest_start, captureExamples.message_book_update]);
+/** The example trade record written on one line, its payload string holding `separator` unescaped, as JSON permits for NEL, U+2028 and U+2029. */
+const tradeWithBreak = (separator: string): string => {
+  const trade = captureExamples.message_trade as { payload: string };
+  return JSON.stringify({ ...captureExamples.message_trade, payload: trade.payload.replace('"trade"', `"tr${separator}ade"`) });
+};
 const TSX = join(repoRootPath, 'node_modules', '.bin', 'tsx');
 const HISTORY_CLI = join(repoRootPath, 'tests', 'a10-history-cli.ts');
 
@@ -160,6 +165,29 @@ describe('A10 file listing (the tree under test)', () => {
     gitIn(root, 'add', '-A', '-f');
     expect(trackedHygieneFiles(root)).toEqual([...inCaptureDirs, 'fixtures/synthetic-baseline.jsonl'].sort());
     for (const path of inCaptureDirs) expect(classifyRepoPath(path, root)).toMatchObject({ ok: false, reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) });
+  });
+
+  it('the repository .gitignore ignores captures/ and normalized/ in lower case only, and does not keep them out of a commit; the rule refuses them in any letter case', () => {
+    const root = newRepo({ '.gitignore': read('.gitignore'), 'a.txt': 'x\n' });
+    commitAll(root, 'base');
+    const ignored = (path: string): boolean => {
+      try {
+        gitIn(root, '-c', 'core.ignorecase=false', 'check-ignore', '-q', '--no-index', path);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(['captures/x.jsonl', 'deep/normalized/x.txt'].map(ignored)).toEqual([true, true]);
+    expect(['Captures/x.jsonl', 'NORMALIZED/x.txt', 'deep/Normalized/x.txt'].map(ignored)).toEqual([false, false, false]);
+    // A case variant is staged by a plain `git add -A`, and a lower-case path by `git mv`, neither forced.
+    mkdirSync(join(root, 'Captures'));
+    writeFileSync(join(root, 'Captures', 'x.jsonl'), raw);
+    gitIn(root, 'add', '-A');
+    mkdirSync(join(root, 'captures'));
+    gitIn(root, 'mv', 'a.txt', 'captures/a.txt');
+    expect(trackedHygieneFiles(root)).toEqual(['Captures/x.jsonl', 'captures/a.txt']);
+    for (const path of ['Captures/x.jsonl', 'captures/a.txt']) expect(classifyRepoPath(path, root)).toMatchObject({ ok: false, reason: expect.stringMatching(/under a captures\/ or normalized\/ directory/) });
   });
 
   it('lists normalize reports anywhere, in any letter case, and checks them against the closed report schema', () => {
@@ -186,27 +214,53 @@ describe('A10 file listing (the tree under test)', () => {
     expect(verdicts).toEqual({
       'README.md': { ok: true, kind: 'other_text' },
       'blob.bin': { ok: true, kind: 'not_inspected' },
-      'capture.jsonl.txt': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
-      'data.ndjson': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
-      'dump.json': { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
-      'notes/capture.txt': { ok: false, reason: 'line 2 is a raw capture record, in a file the fixture rules do not cover' },
+      'capture.jsonl.txt': { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' },
+      'data.ndjson': { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' },
+      'dump.json': { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' },
+      'notes/capture.txt': { ok: false, reason: 'line 2 holds a raw capture record, in a file the fixture rules do not cover' },
     });
   });
 
-  it('splits lines at CR, LF, VT, FF, NEL, U+2028 and U+2029 and trims control and format characters, so none of them hides a record', () => {
+  it('ends lines at CR LF, LF and CR, also tries the parts between VT, FF, NEL, U+2028 and U+2029, and trims control and format characters and marks, so none of them hides a record', () => {
     const record = JSON.stringify(captureExamples.message_trade);
-    const found = (line: number) => ({ ok: false, reason: `line ${line} is a raw capture record, in a file the fixture rules do not cover` });
+    const found = (line: number) => ({ ok: false, reason: `line ${line} holds a raw capture record, in a file the fixture rules do not cover` });
     expect(classifyOtherFile(Buffer.from(`a note\r${record}\r`))).toEqual(found(2));
     expect(classifyOtherFile(Buffer.from(`a note\r\n${record}\r\n`))).toEqual(found(2));
-    expect(classifyOtherFile(Buffer.from(`a note\u0085${record}`))).toEqual(found(2));
-    expect(classifyOtherFile(Buffer.from(`a note\u2028${record}\u2029after`))).toEqual(found(2));
+    // A record set off by the further breaks alone is still found, as a part of its line.
+    expect(classifyOtherFile(Buffer.from(`a note\u0085${record}`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\u2028${record}\u2029after`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\f${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\v${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`a note\nmore\f${record}\n`))).toEqual(found(2));
     expect(classifyOtherFile(Buffer.from(`\u200b${record}\u2060\n`))).toEqual(found(1));
     expect(classifyOtherFile(Buffer.from(`\ufeff${record}\n`))).toEqual(found(1));
-    expect(classifyOtherFile(Buffer.from(`a note\f${record}\n`))).toEqual(found(2));
-    expect(classifyOtherFile(Buffer.from(`a note\v${record}\n`))).toEqual(found(2));
+    // Marks at either end (Unicode M: a combining grapheme joiner, a variation selector, combining acute, an enclosing
+    // circle, a spacing mark), on a line and on a part of one; an object that is not a record still passes.
+    for (const mark of ['\u034f', '\ufe0f', '\u0301', '\u20dd', '\u0903']) {
+      expect(classifyOtherFile(Buffer.from(`${mark}${record}\n`)), mark).toEqual(found(1));
+      expect(classifyOtherFile(Buffer.from(`${record}${mark}\n`)), mark).toEqual(found(1));
+      expect(classifyOtherFile(Buffer.from(`a note\u2028${mark}${record}${mark}\u2029after\n`)), mark).toEqual(found(1));
+    }
+    expect(classifyOtherFile(Buffer.from('\u034f{"type":"not a record"}\ufe0f\n'))).toEqual({ ok: true, kind: 'other_text' });
     // An RFC 7464 JSON text sequence (each record after a record separator) and a C0 control prefix.
     expect(classifyOtherFile(Buffer.from(`\x1e${record}\n\x1e${record}\n`))).toEqual(found(1));
     expect(classifyOtherFile(Buffer.from(`a note\n\x01${record}\x00\n`))).toEqual(found(2));
+  });
+
+  it('finds a record written on one line whose string values hold NEL, U+2028 or U+2029, which JSON permits unescaped', () => {
+    const found = (line: number) => ({ ok: false, reason: `line ${line} holds a raw capture record, in a file the fixture rules do not cover` });
+    for (const separator of ['\u0085', '\u2028', '\u2029']) {
+      const record = tradeWithBreak(separator);
+      expect(record).toContain(separator);
+      expect(JSON.parse(record)).toMatchObject({ type: 'message' });
+      expect(classifyOtherFile(Buffer.from(`${record}\n`))).toEqual(found(1));
+      expect(classifyOtherFile(Buffer.from(`a note\n${record}\n${record}\n`))).toEqual(found(2));
+      expect(classifyOtherFile(Buffer.from(`${JSON.stringify({ ...captureExamples.note, detail: `a${separator}b${separator}c` })}\r\n`))).toEqual(found(1));
+      // A record set off by two of these breaks inside other text is found as a part of its line, as before.
+      expect(classifyOtherFile(Buffer.from(`{"comment":"x${separator}${JSON.stringify(captureExamples.message_trade)}${separator}y"}\n`))).toEqual(found(1));
+      // Text that holds the character but no record passes.
+      expect(classifyOtherFile(Buffer.from(`a note${separator}with a break\n{"type":"summary","text":"x${separator}y"}\n`))).toEqual({ ok: true, kind: 'other_text' });
+    }
   });
 
   it('refuses a Git LFS pointer, whose content lives in the LFS store outside git, in the tree and in the history', () => {
@@ -215,6 +269,11 @@ describe('A10 file listing (the tree under test)', () => {
     expect(classifyOtherFile(Buffer.from(pointer))).toEqual({ ok: false, reason });
     expect(classifyOtherFile(Buffer.from(pointer.replace('git-lfs', 'hawser')))).toEqual({ ok: false, reason });
     expect(classifyOtherFile(Buffer.from('see version https://git-lfs.github.com/spec/v1 for the format\n'))).toEqual({ ok: true, kind: 'other_text' });
+    // git-lfs trims white space before it decodes a pointer, so a pointer after leading white space is refused too; one
+    // that is not on the first line is no pointer to git-lfs.
+    for (const lead of [' ', '\t', '\n', '\r\n', ' \n\t', '\u00a0', '\u0085']) expect(classifyOtherFile(Buffer.from(lead + pointer)), JSON.stringify(lead)).toEqual({ ok: false, reason });
+    expect(classifyOtherFile(Buffer.from(`not a pointer\n${pointer}`))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from(pointer.replace(/\n/g, '\r\n')))).toEqual({ ok: false, reason });
     const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
     const base = commitAll(root, 'base');
     writeFileSync(join(root, '.gitattributes'), '*.bin filter=lfs diff=lfs merge=lfs -text\n');
@@ -226,7 +285,7 @@ describe('A10 file listing (the tree under test)', () => {
 
   it('checks a symbolic link\'s target text and refuses a submodule entry anywhere, in the tree and in the history', () => {
     const record = JSON.stringify(captureExamples.message_trade);
-    const found = { ok: false, reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' };
+    const found = { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' };
     const submodule = { ok: false, reason: 'a submodule entry, whose content lives in another repository, where no layer reads it' };
     const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
     const base = commitAll(root, 'base');
@@ -246,11 +305,61 @@ describe('A10 file listing (the tree under test)', () => {
     ]);
   });
 
+  it('finds a raw capture record block-quoted, after a trailer token, with a trailing comma or in a one-line JSON array', () => {
+    const record = JSON.stringify(captureExamples.message_trade);
+    const found = (line: number) => ({ ok: false, reason: `line ${line} holds a raw capture record, in a file the fixture rules do not cover` });
+    expect(classifyOtherFile(Buffer.from(`${record},\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`[\n  ${record},\n  ${record}\n]\n`))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from(JSON.stringify([captureExamples.message_trade, captureExamples.message_book_update]) + '\n'))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`[${record}],\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`# notes\n\n> ${record}\n`))).toEqual(found(3));
+    expect(classifyOtherFile(Buffer.from(`> > ${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`> ${record}\n`))).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`${record} ,\n`))).toEqual(found(1));
+    // Any white space after the trailer's colon, and padding before the record, as the other forms allow.
+    for (const gap of ['  ', '\u00a0', '\u3000', ' \u200b', ' \u034f']) expect(classifyOtherFile(Buffer.from(`Raw-Record:${gap}${record}\n`)), JSON.stringify(gap)).toEqual(found(1));
+    expect(classifyOtherFile(Buffer.from(`Subject\n\nBody.\n\nRaw-Record: ${record}\n`))).toEqual(found(5));
+    // A quoted key, as in the constructed examples file, is not a trailer token: that form still passes.
+    expect(classifyOtherFile(Buffer.from(`  "message_trade": ${record},\n`))).toEqual({ ok: true, kind: 'other_text' });
+    // Disclosed collision (contract section 6.5): any object whose type is a raw record type is refused, a server-sent-events
+    // sample included, so such a sample is written with its type changed.
+    expect(classifyOtherFile(Buffer.from('event: ping\ndata: {"type":"ping"}\n'))).toEqual(found(2));
+    expect(classifyOtherFile(Buffer.from('event: ping\ndata: {"type":"sse_ping"}\n'))).toEqual({ ok: true, kind: 'other_text' });
+    // The same forms in commit messages, through the history scan.
+    const root = newRepo({ 'README.md': 'x' });
+    const base = commitAll(root, 'base');
+    const quoted = commitAll(root, `a quoted record\n\n> ${record}\n`);
+    const trailer = commitAll(root, `a trailer\n\nRaw-Record: ${record}\n`);
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([
+      { commit: quoted, path: '(commit message)', reason: 'line 3 of the commit message holds a raw capture record' },
+      { commit: trailer, path: '(commit message)', reason: 'line 3 of the commit message holds a raw capture record' },
+    ]);
+  });
+
+  it('takes linear time on long runs of padding inside a line, and walks deeply nested fixture values without overflowing', () => {
+    // A trailing-run regex that could start anywhere in a run of padding took quadratic time (minutes for such a line).
+    for (const pad of [' ', '\u200b', '\u0301']) {
+      const started = performance.now();
+      expect(classifyOtherFile(Buffer.from(`x${pad.repeat(200_000)}x\n`))).toEqual({ ok: true, kind: 'other_text' });
+      expect(performance.now() - started, JSON.stringify(pad)).toBeLessThan(5_000);
+    }
+    // Built as text: 100000 nested arrays, which JSON.parse reads but a recursive walk (or JSON.stringify) cannot.
+    const deep = (inner: string): string => recordedFixture(publishable, (h) => (h.extra = 'DEEP')).replace('"DEEP"', `${'['.repeat(100_000)}${inner}${']'.repeat(100_000)}`);
+    expect(classifyJsonl(deep('"x"'))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+    expect(classifyJsonl(deep(JSON.stringify(captureExamples.message_trade)))).toEqual({
+      ok: false,
+      reason: 'non-blank line 1 carries a raw capture record nested under one of its keys',
+    });
+  });
+
   it('documents what the content check cannot see: a record over several lines, inside other text, or compressed', () => {
     // Disclosed limits (contract section 6.5), not guarantees: each of these passes the check.
     const record = captureExamples.message_trade!;
     expect(classifyOtherFile(Buffer.from(JSON.stringify(record, null, 2) + '\n'))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from(JSON.stringify([record, record], null, 2) + '\n'))).toEqual({ ok: true, kind: 'other_text' });
     expect(classifyOtherFile(Buffer.from(`const x = ${JSON.stringify(record)};\n`))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from(`| 1 | ${JSON.stringify(record)} |\n`))).toEqual({ ok: true, kind: 'other_text' });
+    expect(classifyOtherFile(Buffer.from(JSON.stringify({ records: [record] }) + '\n'))).toEqual({ ok: true, kind: 'other_text' });
     expect(classifyOtherFile(Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xff]))).toEqual({ ok: true, kind: 'not_inspected' });
   });
 
@@ -340,9 +449,26 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     const scan = historyViolations(root, [`${base}..HEAD`]);
     expect(scan.commits).toBe(3);
     expect(scan.violations).toEqual([
-      { commit: added, path: 'data.ndjson', reason: 'line 1 is a raw capture record, in a file the fixture rules do not cover' },
-      { commit: pasted, path: '(commit message)', reason: 'line 3 of the commit message is a raw capture record' },
+      { commit: added, path: 'data.ndjson', reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' },
+      { commit: pasted, path: '(commit message)', reason: 'line 3 of the commit message holds a raw capture record' },
     ]);
+  });
+
+  it('finds a record whose string values hold U+2028, U+2029 or NEL in a file added and deleted, a commit message and a tag message', () => {
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const base = commitAll(root, 'base');
+    writeFileSync(join(root, 'notes.txt'), `a note\n${tradeWithBreak('\u2028')}\n`);
+    const added = commitAll(root, 'add a raw record whose payload holds a line separator');
+    gitIn(root, 'rm', '-q', 'notes.txt');
+    commitAll(root, 'delete it again');
+    const pasted = commitAll(root, `a message\n\n${tradeWithBreak('\u2029')}\n`);
+    gitIn(root, 'tag', '-a', '-m', `release\n${tradeWithBreak('\u0085')}`, 'v-sep');
+    const tag = gitIn(root, 'rev-parse', 'v-sep').trim();
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([
+      { commit: added, path: 'notes.txt', reason: 'line 2 holds a raw capture record, in a file the fixture rules do not cover' },
+      { commit: pasted, path: '(commit message)', reason: 'line 3 of the commit message holds a raw capture record' },
+    ]);
+    expect(tagMessageViolations(root, tag)).toEqual([{ commit: tag, path: '(tag message)', reason: 'line 2 of the tag message holds a raw capture record' }]);
   });
 
   it('ignores replace refs, reading the objects a push sends: a raw commit hidden behind git replace is found', () => {
@@ -366,7 +492,7 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
       `mergetag object ${base}`, ' type commit', ' tag signed', ' tagger a <a@example.invalid> 1791288000 +0000', ' ', ` ${record}`].join('\n');
     const commit = execFileSync('git', ['hash-object', '-t', 'commit', '-w', '--stdin'], { cwd: root, input: `${header}\n\nmerge side\n`, encoding: 'utf8', env: GIT_ENV }).trim();
     gitIn(root, 'update-ref', 'refs/heads/main', commit);
-    expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit, path: '(commit header)', reason: 'line 10 of the commit header (a mergetag, for example) is a raw capture record' }]);
+    expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit, path: '(commit header)', reason: 'line 10 of the commit header (a mergetag, for example) holds a raw capture record' }]);
   });
 
   it('reads the message of an annotated tag, and of a tag it points to, with the same content check', () => {
@@ -376,7 +502,7 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     gitIn(root, 'tag', '-a', '-m', 'outer, clean', 'outer', 'inner');
     const outer = gitIn(root, 'rev-parse', 'outer').trim();
     const inner = gitIn(root, 'rev-parse', 'inner').trim();
-    expect(tagMessageViolations(root, outer)).toEqual([{ commit: inner, path: '(tag message)', reason: 'line 2 of the tag message is a raw capture record' }]);
+    expect(tagMessageViolations(root, outer)).toEqual([{ commit: inner, path: '(tag message)', reason: 'line 2 of the tag message holds a raw capture record' }]);
     expect(tagMessageViolations(root, gitIn(root, 'rev-parse', 'HEAD').trim())).toEqual([]);
     expect(() => tagMessageViolations(root, 'f'.repeat(40))).toThrow(/cannot read tag object/);
   });
@@ -704,13 +830,74 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     expect(c.push('origin', 'main')).toBe('');
     const record = JSON.stringify(captureExamples.message_trade);
     c.hookGit('tag', '-a', '-m', `release\n\n${record}`, 'v-raw');
-    expect(c.push('origin', 'refs/tags/v-raw')).toMatch(/\(tag message\): line 3 of the tag message is a raw capture record/);
+    expect(c.push('origin', 'refs/tags/v-raw')).toMatch(/\(tag message\): line 3 of the tag message holds a raw capture record/);
     expect(remoteRef(c.remote, 'refs/tags/v-raw')).toBeUndefined();
     c.hookGit('tag', '-a', '-m', 'a clean release', 'v-clean');
     expect(c.push('origin', 'refs/tags/v-clean')).toBe('');
     c.hookGit('notes', 'add', '-m', record, 'HEAD');
-    expect(c.push('origin', 'refs/notes/commits')).toMatch(/line 1 is a raw capture record, in a file the fixture rules do not cover/);
+    expect(c.push('origin', 'refs/notes/commits')).toMatch(/line 1 holds a raw capture record, in a file the fixture rules do not cover/);
     expect(remoteRef(c.remote, 'refs/notes/commits')).toBeUndefined();
+  });
+
+  it('refuses a push whose commits carried a record whose string values hold U+2028, and a tag whose message is one', () => {
+    const c = hookClone();
+    expect(c.push('origin', 'main')).toBe('');
+    const record = tradeWithBreak('\u2028');
+    c.hookGit('checkout', '-q', '-b', 'feature');
+    writeFileSync(join(c.root, 'export.txt'), `${record}\n`);
+    c.hookGit('add', '-A');
+    c.hookGit('commit', '-q', '-m', 'an export');
+    c.hookGit('rm', '-q', 'export.txt');
+    c.hookGit('commit', '-q', '-m', 'delete it again');
+    expect(c.push('origin', 'feature')).toMatch(/"export\.txt": line 1 holds a raw capture record[\s\S]*refusing the push of refs\/heads\/feature;/);
+    expect(remoteRef(c.remote, 'feature')).toBeUndefined();
+    c.hookGit('checkout', '-q', 'main');
+    c.hookGit('tag', '-a', '-m', `release\n${record}`, 'v-sep');
+    expect(c.push('origin', 'refs/tags/v-sep')).toMatch(/\(tag message\): line 2 of the tag message holds a raw capture record/);
+    expect(remoteRef(c.remote, 'refs/tags/v-sep')).toBeUndefined();
+  });
+
+  it('documents the limit: it enforces the rule as the working tree has it, so an uncommitted edit lets a raw capture through while the cmp check passes, and only the git status check shows it', () => {
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const remote = tempDir();
+    execFileSync('git', ['init', '-q', '--bare', remote], { env: GIT_ENV, stdio: 'ignore' });
+    mkdirSync(join(root, '.githooks'));
+    copyFileSync(join(repoRootPath, '.githooks', 'pre-push'), join(root, '.githooks', 'pre-push'));
+    mkdirSync(join(root, 'tests'));
+    for (const f of ['jsonl-policy.ts', 'a10-history-cli.ts']) copyFileSync(join(repoRootPath, 'tests', f), join(root, 'tests', f));
+    for (const p of ['node_modules', 'src', 'schemas', 'package.json']) symlinkSync(join(repoRootPath, p), join(root, p));
+    mkdirSync(join(root, '.git', 'info'), { recursive: true });
+    writeFileSync(join(root, '.git', 'info', 'exclude'), 'node_modules\nsrc\nschemas\npackage.json\n');
+    gitIn(root, 'remote', 'add', 'origin', remote);
+    commitAll(root, 'base, with the rule and the scan committed');
+    const installed = join(root, '.git', 'hooks', 'pre-push');
+    mkdirSync(dirname(installed), { recursive: true });
+    copyFileSync(join(root, '.githooks', 'pre-push'), installed);
+    chmodSync(installed, 0o755);
+    const push = (ref: string): string => {
+      try {
+        execFileSync('git', [...IDENTITY, 'push', '-q', 'origin', ref], { cwd: root, encoding: 'utf8', env: GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+        return '';
+      } catch (e) {
+        return (e as { stderr: string }).stderr;
+      }
+    };
+    const ownerChecks = (): { cmp: boolean; status: string } => ({
+      cmp: readRepoFile('.githooks/pre-push', root) === readRepoFile('.git/hooks/pre-push', root),
+      status: gitIn(root, 'status', '--porcelain'),
+    });
+    expect(push('main')).toBe('');
+    gitIn(root, 'checkout', '-q', '-b', 'raw');
+    writeFileSync(join(root, 'session.ndjson'), raw);
+    commitAll(root, 'a raw capture under another name');
+    expect(push('raw')).toMatch(/"session\.ndjson": line 1 holds a raw capture record/);
+    const rule = readRepoFile('tests/jsonl-policy.ts', root);
+    const opening = 'function isRawCaptureRecord(v: Record<string, any>): boolean {\n';
+    expect(rule).toContain(opening);
+    writeFileSync(join(root, 'tests', 'jsonl-policy.ts'), rule.replace(opening, `${opening}  return false;\n`));
+    expect(ownerChecks()).toEqual({ cmp: true, status: ' M tests/jsonl-policy.ts\n' });
+    expect(push('raw')).toBe('');
+    expect(execFileSync('git', ['--git-dir', remote, 'rev-parse', '--verify', '-q', 'refs/heads/raw'], { encoding: 'utf8', env: GIT_ENV }).trim()).toBe(gitIn(root, 'rev-parse', 'HEAD').trim());
   });
 
   it('refuses the push while an installed copy differs from the checkout\'s .githooks/pre-push, so a strengthened hook is not left behind', () => {
@@ -747,7 +934,7 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     const text = [`object ${head}`, 'type commit', 'tag odd', 'tagger a <a@example.invalid> 1791288000 +0000', JSON.stringify(captureExamples.message_trade), '', 'a message', ''].join('\n');
     const tag = execFileSync('git', ['hash-object', '-t', 'tag', '-w', '--literally', '--stdin'], { cwd: c.root, input: text, encoding: 'utf8', env: GIT_ENV }).trim();
     c.hookGit('update-ref', 'refs/tags/odd', tag);
-    expect(c.push('origin', 'refs/tags/odd')).toMatch(/\(tag header\): line 5 of the tag header is a raw capture record/);
+    expect(c.push('origin', 'refs/tags/odd')).toMatch(/\(tag header\): line 5 of the tag header holds a raw capture record/);
     expect(remoteRef(c.remote, 'refs/tags/odd')).toBeUndefined();
   });
 
@@ -889,6 +1076,27 @@ describe('A10 classifier', () => {
 
   it('accepts the shape of a recorded fixture whose rights block is permitted + sample_permitted (constructed; establishes no permission)', () => {
     expect(classifyJsonl(recordedFixture(publishable))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+  });
+
+  it('refuses a raw capture record nested at any depth in a recorded fixture, and keeps other undeclared keys open', () => {
+    const rawRecord = captureExamples.message_trade as Json;
+    const nested = (line: number) => ({ ok: false, reason: `non-blank line ${line} carries a raw capture record nested under one of its keys` });
+    expect(classifyJsonl(recordedFixture(publishable, (h) => (h.extra = rawRecord)))).toEqual(nested(1));
+    expect(classifyJsonl(recordedFixture(publishable, (h) => (h.provenance.capture.extra = [rawRecord])))).toEqual(nested(1));
+    expect(classifyJsonl(recordedFixture(publishable, (h) => (h.provenance.rights.extra = { deeper: rawRecord })))).toEqual(nested(1));
+    const withEvent = (k: number, mutate: (e: Json) => void): string => {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8!);
+      h.eventCount = v2Events.length;
+      publishable(h.provenance.rights);
+      const events = v2Events.map((e) => structuredClone(e));
+      mutate(events[k]!);
+      return jsonl([h, ...events]);
+    };
+    expect(classifyJsonl(withEvent(1, (e) => (e.extra = rawRecord)))).toEqual(nested(3));
+    expect(classifyJsonl(withEvent(0, (e) => (e.bids[0].extra = rawRecord)))).toEqual(nested(2));
+    // Other undeclared keys stay open (forward compatibility), and an unwrapped venue frame under one is the disclosed class.
+    expect(classifyJsonl(recordedFixture(publishable, (h) => (h.extra = { note: 'a forward-compatible field' })))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+    expect(classifyJsonl(recordedFixture(publishable, (h) => (h.extra = venueFrames.trade)))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
   });
 
   const rejects: [string, string, RegExp][] = [
