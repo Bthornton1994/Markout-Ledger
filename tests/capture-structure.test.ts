@@ -4,13 +4,14 @@
 // invented for the tests; none is venue data. PR-1's normalizer must reach the same verdicts (handoff A7(r)).
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync, type Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { crc32 as zlibCrc32 } from 'node:zlib';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, type RunnerTask, type RunnerTestCase } from 'vitest';
 import { analyzeCapture as analyzeCaptureReference, canonicalDecimal, clockEstimate, clockSteps, ownedClockSamples, rfc3339Micros, type RawRecord, type SelectedInstrument } from './capture-structure.js';
 
 const addFormats = addFormatsModule.default;
@@ -28,7 +29,12 @@ const examples = readJson('schemas/examples/capture-record.v1.examples.json').ex
  * `<n>.jsonl` per stream (one JSON.stringify(record) plus '\n' per record, in stream order: its raw files one after
  * another, each ending with its `file_end`) and `vectors.json`, which lists each file with the test that built it and the
  * selected instrument the reference judged it for. The streams are constructed, not venue data, but they are raw capture
- * records, which A10 refuses in the tree, so a directory inside the repository is refused.
+ * records, which A10 refuses in the tree, so the export refuses a directory inside the repository (also through a link),
+ * a path through a dangling link, an empty value, and a run of this file in which a test failed or did not run (a -t
+ * filter included), and writes only into a new directory or an existing empty one that is not a link, creating every file
+ * exclusively, so it never writes through a link or hard link planted there. Every
+ * book frame of every stream carries the checksum contract section 8.2 computes, verified again before export, so a
+ * normalizer's checksum verification passes and never keeps it from the segment, window and clock rules a vector tests.
  */
 const judged: { test: string; instrument: SelectedInstrument; records: RawRecord[] }[] = [];
 const analyzeCapture = (records: RawRecord[], instrument: SelectedInstrument): ReturnType<typeof analyzeCaptureReference> => {
@@ -36,29 +42,312 @@ const analyzeCapture = (records: RawRecord[], instrument: SelectedInstrument): R
   return analyzeCaptureReference(records, instrument);
 };
 const repoRootPath = fileURLToPath(repoRoot);
-/** `path` with its longest existing prefix resolved through symbolic links, so a link into the repository is seen as such. */
+const lstatOrNull = (path: string): Stats | null => {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+};
+/** `path` with its longest existing prefix resolved through symbolic links, so a link into the repository is seen as such;
+ * a dangling link on the path makes it throw. */
 const realPath = (path: string): string => {
   let head = resolve(path);
   const rest: string[] = [];
-  while (!existsSync(head)) {
+  while (lstatOrNull(head) === null) {
     rest.unshift(basename(head));
     head = dirname(head);
   }
   return join(realpathSync(head), ...rest);
 };
-afterAll(() => {
+/** Whether a resolved path lies outside the repository (a name that merely starts with '..' is inside it). */
+const outsideRepository = (path: string): boolean => {
+  const rel = relative(realpathSync(repoRootPath), path);
+  return rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+};
+/**
+ * Creates `path` and writes all of `data`, failing if anything exists there, a link or a hard-linked file included
+ * (O_EXCL). The file is recorded in `created` as soon as it exists; a write that stores fewer bytes than asked is
+ * continued until every byte is written, and one that stores none is an error.
+ */
+const writeNew = (path: string, data: string, created: string[] = []): void => {
+  const fd = openSync(path, 'wx');
+  created.push(path);
+  let failure: unknown;
+  try {
+    const bytes = Buffer.from(data, 'utf8');
+    for (let done = 0; done < bytes.length; ) {
+      const n = exportIo.writeSync(fd, bytes, done, bytes.length - done);
+      if (n <= 0) throw new Error(`CAPTURE_VECTORS_OUT: a write to ${path} stored nothing (${done} of ${bytes.length} bytes written)`);
+      done += n;
+    }
+  } catch (e) {
+    failure = e;
+  }
+  // A close that fails is an error too, but never in place of the write's own.
+  try {
+    exportIo.closeSync(fd);
+  } catch (e) {
+    failure ??= e;
+  }
+  if (failure !== undefined) throw failure;
+};
+/** The system calls the export makes after creating a file; a test replaces them to make a write or a close fail, or a
+ * write store fewer bytes than asked. */
+const exportIo = {
+  writeSync: (fd: number, buffer: Buffer, offset: number, length: number): number => writeSync(fd, buffer, offset, length),
+  closeSync: (fd: number): void => closeSync(fd),
+};
+/** What a run of this file did: the tests that failed, and the tests it did not run (filtered out with `-t`, `.only` or a
+ * `.skip`), apart from the two that only exercise the export and are skipped in a run that exports. */
+type RunOutcome = { failed: string[]; skipped: string[] };
+const EXPORT_HARNESS = new Set(['export self-test: a failing test', 'writes every stream the reference judges when CAPTURE_VECTORS_OUT names a directory outside the repository, end to end']);
+/**
+ * Writes the judged streams to `out` for PR-1 (handoff A7(r)), or throws: an empty value, a value
+ * with a '..' segment, a path through a dangling link, a target inside the repository (also through a link), a run in
+ * which a test failed or was not run (so the streams are every vector, each judged by a passing test), a stream whose
+ * book checksums section 8.2 does not verify, or a target that exists and is not an empty directory (a link to one
+ * included) is refused before any file is written. Every file is created exclusively, so a link or hard link planted in
+ * the directory is never written through, and a write that fails removes the files and directories the export created
+ * (a clean-up that fails too is reported with the write's error). Two limits: a bind mount of the repository is not recognized as the repository (A10's tree test refuses the raw streams
+ * it holds once they are staged, and the opt-in pre-push hook and CI refuse them in the ranges they scan, contract section
+ * 6.5), and a process killed during the writes leaves the files written so far.
+ */
+function exportVectors(out: string, streams: typeof judged, run: RunOutcome): void {
+  if (out.trim() === '') throw new Error('CAPTURE_VECTORS_OUT is set but empty: name a directory outside the repository, or unset it');
+  // path.resolve reads a '..' segment lexically, the file system after following the link before it, so the two could
+  // name different directories: a value with one is refused before anything is resolved.
+  if (out.split(/[\\/]/).includes('..')) throw new Error(`CAPTURE_VECTORS_OUT must not contain a '..' segment: ${out}`);
+  let resolved: string;
+  try {
+    resolved = realPath(out);
+  } catch {
+    throw new Error(`CAPTURE_VECTORS_OUT cannot be resolved (a dangling link on its path, for example): ${out}`);
+  }
+  if (!outsideRepository(resolved)) throw new Error(`CAPTURE_VECTORS_OUT must be outside the repository: ${out}`);
+  if (run.failed.length > 0) throw new Error(`CAPTURE_VECTORS_OUT: ${run.failed.length} test(s) failed (${run.failed.join('; ')}), so no stream is exported`);
+  if (run.skipped.length > 0) throw new Error(`CAPTURE_VECTORS_OUT: ${run.skipped.length} test(s) did not run (${run.skipped.join('; ')}); run the whole file, so every vector is exported`);
+  for (const [k, v] of streams.entries()) {
+    const { failed: bad } = replayBookChecksums(v.records, v.instrument.symbol);
+    if (bad.length > 0) throw new Error(`CAPTURE_VECTORS_OUT: stream ${k} (${v.test}) has book frames whose section 8.2 checksum fails, at ${bad.join(', ')}`);
+  }
+  // The target itself may not be a link (lstat of the value as written would follow one named with a trailing '/' or
+  // '/.'); from here on every call names the resolved directory, so what was checked is what is written.
+  if (lstatOrNull(resolve(out))?.isSymbolicLink()) throw new Error(`CAPTURE_VECTORS_OUT must be a new directory or an existing empty one that is not a link: ${out}`);
+  const found = lstatOrNull(resolved);
+  let created = false;
+  /** The first directory mkdir created (the target or one of its parents), up to which a rollback removes. */
+  let firstCreated: string | undefined;
+  const removeCreated = (): void => {
+    if (!created) return;
+    for (let d = resolved; ; d = dirname(d)) {
+      rmdirSync(d);
+      if (d === (firstCreated ?? resolved)) break;
+    }
+  };
+  if (found === null) {
+    firstCreated = mkdirSync(resolved, { recursive: true });
+    created = true;
+  } else if (!found.isDirectory() || readdirSync(resolved).length > 0) {
+    throw new Error(`CAPTURE_VECTORS_OUT must be a new directory or an existing empty one that is not a link: ${out}`);
+  }
+  // Checked again on the directory itself, against a link swapped in between the check above and mkdir (defence in depth:
+  // without such a race the two checks agree).
+  if (!outsideRepository(realpathSync(resolved))) {
+    removeCreated();
+    throw new Error(`CAPTURE_VECTORS_OUT must be outside the repository: ${out}`);
+  }
+  // A write that fails removes the files this export created (each exclusively, so each is its own) and every directory it
+  // made, so a failed export leaves no vector unless that clean-up fails too, which it reports.
+  const written: string[] = [];
+  try {
+    const index = streams.map((v, k) => {
+      const file = `${String(k).padStart(3, '0')}.jsonl`;
+      writeNew(join(resolved, file), v.records.map((r) => JSON.stringify(r) + '\n').join(''), written);
+      return { file, test: v.test, instrument: v.instrument };
+    });
+    writeNew(join(resolved, 'vectors.json'), JSON.stringify(index, null, 2) + '\n', written);
+  } catch (e) {
+    // Each file is recorded as soon as it exists, so one whose write failed is removed too. A clean-up that fails is
+    // reported with the error that caused it, never in its place.
+    try {
+      for (const path of written) rmSync(path, { force: true });
+      removeCreated();
+    } catch (cleanup) {
+      throw new Error(`${(e as Error).message}; removing what the export wrote also failed, so it may be left: ${(cleanup as Error).message}`, { cause: e });
+    }
+    throw e;
+  }
+}
+/** What this run did, read from the file's tasks once every test has run. */
+const runOutcome = (file: Readonly<RunnerTask>): RunOutcome => {
+  const tests = (task: Readonly<RunnerTask>): Readonly<RunnerTestCase>[] => (task.type === 'test' ? [task] : task.tasks.flatMap(tests));
+  const all = tests(file);
+  return {
+    failed: all.filter((t) => t.result?.state === 'fail').map((t) => t.name),
+    skipped: all.filter((t) => t.result?.state !== 'fail' && t.result?.state !== 'pass' && !(t.mode === 'skip' && EXPORT_HARNESS.has(t.name))).map((t) => t.name),
+  };
+};
+afterAll(({}, file) => {
   const out = process.env.CAPTURE_VECTORS_OUT;
-  if (!out) return;
-  const rel = relative(realpathSync(repoRootPath), realPath(out));
-  if (!(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))) throw new Error(`CAPTURE_VECTORS_OUT must be outside the repository: ${out}`);
-  mkdirSync(out, { recursive: true });
-  const index = judged.map((v, k) => {
-    const file = `${String(k).padStart(3, '0')}.jsonl`;
-    writeFileSync(join(out, file), v.records.map((r) => JSON.stringify(r) + '\n').join(''));
-    return { file, test: v.test, instrument: v.instrument };
-  });
-  writeFileSync(join(out, 'vectors.json'), JSON.stringify(index, null, 2) + '\n');
+  if (out !== undefined) exportVectors(out, judged, runOutcome(file));
 });
+
+/** CRC-32 of the IEEE 802.3 polynomial (the zlib and binascii CRC-32), table-driven and written here independently of node:zlib, which a test compares it with (contract section 8.2, step 3). */
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(text: string): number {
+  let c = 0xffffffff;
+  for (const byte of Buffer.from(text, 'utf8')) c = CRC_TABLE[(c ^ byte) & 0xff]! ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+/** A book level as the wire gave it: [price lexeme, qty lexeme]. */
+type Level = [string, string];
+/** Section 8.2 step 2: a wire lexeme without its decimal point, then without its leading zeros. */
+const checksumPart = (lexeme: string): string => lexeme.replace('.', '').replace(/^0+/, '');
+/** Section 8.2 steps 1 to 3: the top 10 asks from the lowest price, then the top 10 bids from the highest, each level's price then quantity part, CRC-32 of the concatenation. Prices compare as numbers, exact for the lexemes these vectors use. */
+function bookChecksum(asks: Level[], bids: Level[]): number {
+  const top = (side: Level[], dir: 1 | -1): Level[] => [...side].sort((a, b) => dir * (Number(a[0]) - Number(b[0]))).slice(0, 10);
+  return crc32([...top(asks, 1), ...top(bids, -1)].map(([p, q]) => checksumPart(p) + checksumPart(q)).join(''));
+}
+/** A local book as section 8.2 keeps it: per side, the lexemes of the message that last set each price level, truncated to the subscribed depth (100). */
+class LexemeBook {
+  readonly asks = new Map<string, Level>();
+  readonly bids = new Map<string, Level>();
+  apply(side: 'asks' | 'bids', levels: Level[]): void {
+    for (const [price, qty] of levels) {
+      if (Number(qty) === 0) this[side].delete(canonicalDecimal(price));
+      else this[side].set(canonicalDecimal(price), [price, qty]);
+    }
+    const kept = [...this[side].entries()].sort((a, b) => (side === 'asks' ? 1 : -1) * (Number(a[1][0]) - Number(b[1][0]))).slice(0, 100);
+    this[side].clear();
+    for (const [key, level] of kept) this[side].set(key, level);
+  }
+  checksum(): number {
+    return bookChecksum([...this.asks.values()], [...this.bids.values()]);
+  }
+}
+/** Exact comparison of two unsigned decimal lexemes, independent of Number (the replay's own ordering). */
+const compareDecimal = (a: string, b: string): number => {
+  const [ai = '', af = ''] = canonicalDecimal(a).split('.');
+  const [bi = '', bf = ''] = canonicalDecimal(b).split('.');
+  const width = Math.max(af.length, bf.length);
+  const x = BigInt(ai + af.padEnd(width, '0'));
+  const y = BigInt(bi + bf.padEnd(width, '0'));
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+/** Section 8.2's checksum built a second way, for the replay: its own ordering, its own concatenation and node:zlib's CRC-32. */
+function independentBookChecksum(asks: Level[], bids: Level[]): number {
+  const strip = (lexeme: string): string => lexeme.split('.').join('').replace(/^0*/, '');
+  const sortedAsks = [...asks].sort((a, b) => compareDecimal(a[0], b[0])).slice(0, 10);
+  const sortedBids = [...bids].sort((a, b) => compareDecimal(b[0], a[0])).slice(0, 10);
+  let text = '';
+  for (const [p, q] of [...sortedAsks, ...sortedBids]) text += strip(p) + strip(q);
+  return zlibCrc32(Buffer.from(text, 'utf8')) >>> 0;
+}
+/** The five-level book of contract section 8.2, whose checksum the contract publishes: 1396696505. */
+const FIVE_BOOK = { asks: [['62710.5', '0.93111634'], ['62710.6', '0.50000000'], ['62711.0', '1.20000000']] as Level[], bids: [['62710.4', '0.01000000'], ['62709.1', '2.00000000']] as Level[] };
+/**
+ * A book twelve levels deep on each side. Its checksum is 2975579563, the CRC32 of DEEP_BOOK_TOP10: that string was written
+ * by hand from section 8.2's rule, the ten lowest asks then the ten highest bids (the eleventh and twelfth levels of each
+ * side are not in it), and its CRC32 computed with Python's binascii.crc32. Without its best ask, so that the eleventh enters
+ * the top ten, 1703851086.
+ */
+const DEEP_BOOK = {
+  asks: [['62710.5', '0.50000000'], ['62710.6', '0.12000000'], ['62710.7', '1.00000000'], ['62710.8', '0.00031000'], ['62710.9', '2.50000000'], ['62711.0', '0.75000000'], ['62711.1', '0.01000000'], ['62711.2', '3.00000000'], ['62711.3', '0.00000500'], ['62711.4', '1.10000000'], ['62711.5', '0.20000000'], ['62711.6', '4.00000000']] as Level[],
+  bids: [['62710.4', '0.25000000'], ['62710.3', '0.60000000'], ['62710.2', '1.50000000'], ['62710.1', '0.00200000'], ['62710.0', '2.00000000'], ['62709.9', '0.03000000'], ['62709.8', '0.40000000'], ['62709.7', '5.00000000'], ['62709.6', '0.00000100'], ['62709.5', '0.90000000'], ['62709.4', '0.70000000'], ['62709.3', '6.00000000']] as Level[],
+};
+const DEEP_BOOK_TOP10 = '627105500000006271061200000062710710000000062710831000627109250000000627110750000006271111000000627112300000000627113500627114110000000627104250000006271036000000062710215000000062710120000062710020000000062709930000006270984000000062709750000000062709610062709590000000';
+/** The checksum a book frame record carries for its first element. */
+const frameChecksum = (record: RawRecord): number => Number(JSON.parse(record.payload as string).data[0].checksum);
+/**
+ * Replays a stream's book frames as section 8.2's synchronization does, with its own book and checksum, and returns the
+ * stream indices of the book elements it verified and of those it failed: per socket, elements before its first snapshot
+ * are not verified (dropped.depthBeforeSnapshot), a snapshot replaces the book, an update is applied (a zero quantity
+ * deletes the level), and after a failure nothing is verified until the next snapshot; an element of another pair is
+ * malformed (R6) and never verified.
+ */
+function replayBookChecksums(records: RawRecord[], symbol = 'BTC/USD'): { verified: number[]; failed: number[]; snapshots: number[]; updates: number[] } {
+  const out = { verified: [] as number[], failed: [] as number[], snapshots: [] as number[], updates: [] as number[] };
+  let book: { asks: Map<string, Level>; bids: Map<string, Level> } | null = null;
+  for (const [i, r] of records.entries()) {
+    if (r.type === 'ws_open') book = null;
+    if (r.type !== 'message' || r.stream !== 'book' || typeof r.payload !== 'string') continue;
+    let frame: any;
+    try {
+      frame = JSON.parse(r.payload, ((_key: string, value: unknown, context?: { source?: string }) => (typeof value === 'number' && context?.source !== undefined ? context.source : value)) as (key: string, value: unknown) => unknown);
+    } catch {
+      continue;
+    }
+    for (const element of Array.isArray(frame?.data) ? frame.data : []) {
+      if (element?.symbol !== symbol) continue;
+      const levels = (side: unknown): Level[] => (Array.isArray(side) ? side.map((l: any) => [String(l.price), String(l.qty)] as Level) : []);
+      if (frame.type === 'snapshot') book = { asks: new Map(), bids: new Map() };
+      else if (book === null) continue;
+      for (const [side, list] of [['asks', levels(element.asks)], ['bids', levels(element.bids)]] as const) {
+        for (const [price, qty] of list) {
+          if (compareDecimal(qty, '0') === 0) book[side].delete(canonicalDecimal(price));
+          else book[side].set(canonicalDecimal(price), [price, qty]);
+        }
+      }
+      (frame.type === 'snapshot' ? out.snapshots : out.updates).push(i);
+      if (independentBookChecksum([...book.asks.values()], [...book.bids.values()]) === Number(element.checksum)) out.verified.push(i);
+      else {
+        out.failed.push(i);
+        book = null;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Replays every stream's book checksums as section 8.2 defines them (none may fail) and counts what a normalizer that
+ * verifies them reaches: verified snapshots and updates, the first segment of each socket (its first verified update
+ * inside the socket's window, ending before the next clock step, where R3 cuts) and those segments whose owned clock
+ * samples yield an estimate, a lower bound, since a later segment after a clock cut is not counted. Not vacuous: the
+ * vectors reach many of each, as a normalizer that checks every checksum would find.
+ */
+function expectReach(streams: { test: string; instrument: SelectedInstrument; records: RawRecord[] }[], what: string): void {
+  let snapshots = 0;
+  let updates = 0;
+  let segments = 0;
+  let estimates = 0;
+  const checksums = new Set<number>();
+  for (const [k, v] of streams.entries()) {
+    // Each stream is replayed for its own instrument. The tape builds books only for BTC/USD, so every vector with book
+    // frames is a BTC/USD vector and this per-instrument replay is exercised only by the export's another-pair case.
+    const replay = replayBookChecksums(v.records, v.instrument.symbol);
+    expect(replay.failed, `stream ${k}: ${v.test}`).toEqual([]);
+    snapshots += replay.snapshots.length;
+    updates += replay.updates.length;
+    for (const i of replay.verified) checksums.add(frameChecksum(v.records[i]!));
+    const report = analyzeCaptureReference(v.records, v.instrument);
+    if (report.refused !== null) continue;
+    for (const socket of report.sockets) {
+      if (socket.refused !== null || socket.window === null) continue;
+      const [from, to] = socket.window;
+      const first = replay.verified.find((i) => replay.updates.includes(i) && i >= from && i <= to);
+      if (first === undefined) continue;
+      segments += 1;
+      const step = clockSteps(v.records).find((s) => s > first) ?? Infinity;
+      const last = Math.max(...replay.verified.filter((i) => i >= first && i <= to && i < step));
+      if (clockEstimate(v.records, ownedClockSamples(v.records, socket, first, last)) !== null) estimates += 1;
+    }
+  }
+  expect(streams.length, what).toBeGreaterThan(150);
+  expect(snapshots, what).toBeGreaterThan(150);
+  expect(updates, what).toBeGreaterThan(180);
+  expect(segments, what).toBeGreaterThan(60);
+  expect(estimates, what).toBeGreaterThan(45);
+  // Many book states, among them the two whose checksums are known from outside this code: the contract's five-level
+  // book and the twelve-level book, so a tape that writes one value, or code that keeps more than ten levels, fails here.
+  expect(checksums.has(1396696505) && checksums.has(2975579563), what).toBe(true);
+  expect(checksums.size, what).toBeGreaterThanOrEqual(6);
+}
 
 const BTC: SelectedInstrument = { symbol: 'BTC/USD', pricePrecision: 1, qtyPrecision: 8, priceIncrement: '0.1', qtyIncrement: '0.00000001' };
 type Channel = 'book' | 'trade' | 'instrument';
@@ -71,6 +360,8 @@ class Tape {
   /** A wall-clock offset against the monotonic clock: a clock step when it changes by more than 10 ms (section 5.6). */
   private wallShift = 0;
   private reqId = 0;
+  /** The local book the tape's book frames build (section 8.2), reset at every ws_open. */
+  private localBook = new LexemeBook();
   constructor() {
     this.push('manifest_start', { ...structuredClone(examples.manifest_start) });
   }
@@ -90,6 +381,7 @@ class Tape {
     return this.records.length - 1;
   }
   open(): number {
+    this.localBook = new LexemeBook();
     return this.push('ws_open', { detail: 'open' });
   }
   close(detail: string): number {
@@ -131,8 +423,24 @@ class Tape {
     };
     return this.push('message', { stream: 'instrument', payload: `{"channel":"instrument","type":"${type}","data":{"assets":[],"pairs":[${[pair, ...more].map(entry).join(',')}]}}` });
   }
-  book(type: 'snapshot' | 'update' = 'update', symbol = 'BTC/USD'): number {
-    return this.push('message', { stream: 'book', payload: `{"channel":"book","type":"${type}","data":[{"symbol":"${symbol}","bids":[{"price":62710.4,"qty":0.25}],"asks":[{"price":62710.5,"qty":0.5}],"checksum":1234567890,"timestamp":"2026-10-06T12:00:01.000000Z"}]}` });
+  /**
+   * A book frame whose levels keep the lexemes given here and whose checksum is the one section 8.2 computes over the book
+   * the tape's frames build (a snapshot replaces it, an update is applied); a frame of another pair is malformed (R6) and
+   * never verified, so its checksum covers its own levels. `corrupt` adds 1 to the checksum, for tests of the replay.
+   */
+  book(type: 'snapshot' | 'update' = 'update', symbol = 'BTC/USD', levels: { bids?: Level[]; asks?: Level[]; corrupt?: boolean } = {}): number {
+    const bids = levels.bids ?? [['62710.4', '0.25']];
+    const asks = levels.asks ?? [['62710.5', '0.5']];
+    let checksum = bookChecksum(asks, bids);
+    if (symbol === 'BTC/USD') {
+      if (type === 'snapshot') this.localBook = new LexemeBook();
+      this.localBook.apply('asks', asks);
+      this.localBook.apply('bids', bids);
+      checksum = this.localBook.checksum();
+    }
+    if (levels.corrupt) checksum = (checksum + 1) >>> 0;
+    const side = (list: Level[]): string => list.map(([p, q]) => `{"price":${p},"qty":${q}}`).join(',');
+    return this.push('message', { stream: 'book', payload: `{"channel":"book","type":"${type}","data":[{"symbol":"${symbol}","bids":[${side(bids)}],"asks":[${side(asks)}],"checksum":${checksum},"timestamp":"2026-10-06T12:00:01.000000Z"}]}` });
   }
   trade(...symbols: string[]): number {
     const items = (symbols.length ? symbols : ['BTC/USD']).map((s, k) => `{"symbol":"${s}","side":"buy","price":62710.5,"qty":0.0012,"ord_type":"market","trade_id":${1000 + k},"timestamp":"2026-10-06T12:00:01.000000Z"}`);
@@ -1441,35 +1749,430 @@ describe('the manifest\'s REST specification (R5, sections 5.10 step (1) and 8.4
   });
 });
 
+describe('the book checksum of contract section 8.2, which every vector book frame carries', () => {
+  const WORKED = '45285210000045286415457195345286615457110945289615456091145290215890660452918154553491452947445474945296135380000452975994554245299518772827452835100000004528341545820154528211000000045281010000000452803154592586452790799000045277633101034527753000000045277315460273745276615445238';
+  const FIVE = FIVE_BOOK;
+
+  it('reproduces both published vectors: the venue worked example (3310070434) and the contract five-level book (1396696505)', () => {
+    expect(WORKED).toHaveLength(281);
+    expect(crc32(WORKED)).toBe(3310070434);
+    expect(zlibCrc32(WORKED) >>> 0).toBe(3310070434);
+    expect(bookChecksum(FIVE.asks, FIVE.bids)).toBe(1396696505);
+    expect(independentBookChecksum(FIVE.asks, FIVE.bids)).toBe(1396696505);
+    // The concatenation itself, asks from the lowest price then bids from the highest.
+    const text = [...FIVE.asks, ...[...FIVE.bids]].map(([p, q]) => checksumPart(p) + checksumPart(q)).join('');
+    expect(text).toBe('62710593111634627106500000006271101200000006271041000000627091200000000');
+    // The strip rules the venue's SDK test pins (section 8.2).
+    expect(['45285.21000000', '0.00159953', '0', '0.0', '0.000123'].map(checksumPart)).toEqual(['4528521000000', '159953', '', '', '123']);
+    // Order matters: the same levels given in another order still check to the same value, and a wrong side order does not.
+    expect(bookChecksum([...FIVE.asks].reverse(), [...FIVE.bids].reverse())).toBe(1396696505);
+    expect(bookChecksum(FIVE.bids, FIVE.asks)).not.toBe(1396696505);
+  });
+
+  it('agrees with node:zlib and with the independent ordering and concatenation on generated books', () => {
+    let seed = 20260925;
+    const next = (n: number): number => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed % n;
+    };
+    const lexeme = (whole: number, decimals: number): string => (decimals === 0 ? String(whole) : `${whole}.${String(next(10 ** Math.min(decimals, 6))).padStart(decimals, '0')}`);
+    for (let round = 0; round < 400; round++) {
+      const side = (): Level[] => {
+        const seen = new Set<string>();
+        const out: Level[] = [];
+        for (let k = next(16); k > 0; k--) {
+          const price = lexeme(60000 + next(5000), 1 + next(3));
+          if (seen.has(canonicalDecimal(price))) continue;
+          seen.add(canonicalDecimal(price));
+          out.push([price, next(4) === 0 ? lexeme(next(20), 0) : lexeme(next(3), 1 + next(8))]);
+        }
+        return out.filter(([, q]) => Number(q) !== 0);
+      };
+      const asks = side();
+      const bids = side();
+      expect(bookChecksum(asks, bids), JSON.stringify({ asks, bids })).toBe(independentBookChecksum(asks, bids));
+      const text = asks.map(([p, q]) => p + q).join('|');
+      expect(crc32(text)).toBe(zlibCrc32(text) >>> 0);
+    }
+  });
+
+  it('writes tape book frames that verify as section 8.2 replays them, and the replay catches a wrong one', () => {
+    const t = new Tape();
+    const a = t.subscribedSocket();
+    const deep: Level[] = Array.from({ length: 12 }, (_, k) => [`6272${k}.5`, `0.${String(k + 1).padStart(8, '0')}`]);
+    const moves = [
+      t.book('update', 'BTC/USD', { asks: deep, bids: [['62709.9', '1.00000000']] }),
+      t.book('update', 'BTC/USD', { asks: [['62720.5', '0.00000000']], bids: [['62709.9', '0.0']] }),
+      t.book('update', 'BTC/USD', { asks: [['62711.0', '2.50']], bids: [['62700.0', '3']] }),
+    ];
+    const foreign = t.book('update', 'ETH/USD');
+    const wrong = t.book('update', 'BTC/USD', { corrupt: true });
+    const unsynced = t.book();
+    const snapshot = t.book('snapshot');
+    const after = t.book();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const replay = replayBookChecksums(records);
+    expect(replay.verified).toEqual([a.update - 1, a.update, ...moves, snapshot, after]);
+    // The corrupted update fails; the update after it is not verified until the next snapshot; the other pair's frame
+    // is never verified (section 8.2, steps 2 and 3; R6).
+    expect(replay.failed).toEqual([wrong]);
+    expect(replay.updates).not.toContain(unsynced);
+    expect([...replay.verified, ...replay.failed]).not.toContain(foreign);
+  });
+});
+
+describe('vectors whose books take section 8.2 beyond one book state (handoff A7(r))', () => {
+  it('takes only the ten best levels of each side: a twelve-level book gives the CRC32 of its hand-written top-ten string', () => {
+    expect(DEEP_BOOK_TOP10).toHaveLength(270);
+    expect(zlibCrc32(DEEP_BOOK_TOP10) >>> 0).toBe(2975579563);
+    expect(crc32(DEEP_BOOK_TOP10)).toBe(2975579563);
+    expect(bookChecksum(DEEP_BOOK.asks, DEEP_BOOK.bids)).toBe(2975579563);
+    expect(independentBookChecksum([...DEEP_BOOK.asks].reverse(), [...DEEP_BOOK.bids].reverse())).toBe(2975579563);
+  });
+
+  it('carries a book deeper than ten levels: a change beyond the tenth level keeps the checksum until a delete brings it into the top ten', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    const deep = t.book('snapshot', 'BTC/USD', DEEP_BOOK);
+    const beyond = t.book('update', 'BTC/USD', { bids: [['62709.3', '7.00000000']], asks: [['62711.6', '4.50000000']] });
+    const enters = t.book('update', 'BTC/USD', { bids: [], asks: [['62710.5', '0.00000000']] });
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toBeNull();
+    expect([deep, beyond, enters].map((i) => frameChecksum(records[i]!))).toEqual([2975579563, 2975579563, 1703851086]);
+    const replay = replayBookChecksums(records);
+    expect(replay.failed).toEqual([]);
+    expect(replay.verified).toEqual(expect.arrayContaining([deep, beyond, enters]));
+  });
+
+  it('starts each socket from no book: an update before a reconnection\'s snapshot is not verified against the last socket\'s book', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    t.book('snapshot', 'BTC/USD', DEEP_BOOK);
+    t.close('liveness_timeout');
+    t.open();
+    const ids = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, t.sub(c)] as const);
+    for (const [c, id] of ids) t.ack(id, c, { timed: true });
+    t.instrument();
+    const early = t.book('update', 'BTC/USD', { bids: [['62710.4', '0.25000000']], asks: [] });
+    const snapshot = t.book('snapshot', 'BTC/USD', FIVE_BOOK);
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const replay = replayBookChecksums(records);
+    expect(replay.failed).toEqual([]);
+    expect(replay.updates).not.toContain(early);
+    // The tape starts the new socket from no book, as a normalizer must: this update's checksum covers its own level only
+    // (a normalizer that kept the last socket's book would compute 2975579563 and fail it, were it verified).
+    expect(frameChecksum(records[early]!)).toBe(3267759264);
+    expect(replay.verified).toContain(snapshot);
+    expect(frameChecksum(records[snapshot]!)).toBe(1396696505);
+    const report = analyzeCapture(records, BTC);
+    expect(report.refused).toBeNull();
+    expect(report.sockets.map((s) => s.refused)).toEqual([null, null]);
+  });
+
+  it('carries the contract five-level book after a snapshot that replaces a populated book, then a delete and a re-add', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    // A level the next snapshot does not hold: kept by a replay that did not reset its book, it would fail the snapshot.
+    t.book('update', 'BTC/USD', { bids: [], asks: [['62712.0', '0.10000000']] });
+    const five = t.book('snapshot', 'BTC/USD', FIVE_BOOK);
+    const removed = t.book('update', 'BTC/USD', { bids: [['62709.1', '0.00000000']], asks: [] });
+    const readded = t.book('update', 'BTC/USD', { bids: [['62709.1', '1.00000000']], asks: [] });
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toBeNull();
+    const values = [five, removed, readded].map((i) => frameChecksum(records[i]!));
+    expect(values[0]).toBe(1396696505);
+    expect(new Set(values).size).toBe(3);
+    const replay = replayBookChecksums(records);
+    expect(replay.failed).toEqual([]);
+    expect(replay.verified).toEqual(expect.arrayContaining([five, removed, readded]));
+  });
+});
+
+describe('the export self-test hook', () => {
+  // Fails on purpose only when the export self-test asks for it, to show that a run with a failing test exports nothing.
+  it.runIf(process.env.CAPTURE_VECTORS_SELFTEST_FAIL === '1')('export self-test: a failing test', () => {
+    expect('this test fails on purpose').toBe('');
+  });
+});
+
 describe('the vector streams, for PR-1 (handoff A7(r))', () => {
-  it.skipIf(process.env.CAPTURE_VECTORS_OUT !== undefined)('writes every stream the reference judges when CAPTURE_VECTORS_OUT names a directory outside the repository', () => {
+  const CLEAN: RunOutcome = { failed: [], skipped: [] };
+  const sample = (): typeof judged => {
+    const t = new Tape();
+    t.subscribedSocket();
+    t.close('capture_end');
+    return [{ test: 'sample', instrument: BTC, records: t.end() }];
+  };
+
+  it('refuses an empty value, a run that failed or skipped a test, a bad checksum and a target inside the repository, and writes nothing', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-vectors-'));
+    try {
+      for (const empty of ['', '   ']) expect(() => exportVectors(empty, sample(), CLEAN), JSON.stringify(empty)).toThrow(/set but empty/);
+      expect(() => exportVectors(join(dir, 'a'), sample(), { failed: ['some test'], skipped: [] })).toThrow(/test\(s\) failed/);
+      expect(() => exportVectors(join(dir, 'c'), sample(), { failed: [], skipped: ['some test'] })).toThrow(/did not run/);
+      const bad = sample();
+      const t = new Tape();
+      t.subscribedSocket();
+      t.book('update', 'BTC/USD', { corrupt: true });
+      t.close('capture_end');
+      bad.push({ test: 'corrupt', instrument: BTC, records: t.end() });
+      expect(() => exportVectors(join(dir, 'b'), bad, CLEAN)).toThrow(/section 8.2 checksum fails/);
+      // Each stream is replayed for its own selected instrument, not only for BTC/USD.
+      const other = new Tape();
+      other.subscribedSocket();
+      other.book('snapshot', 'ETH/USD', { bids: [['2500.10', '1.00000000']], asks: [['2500.20', '2.00000000']], corrupt: true });
+      other.close('capture_end');
+      expect(() => exportVectors(join(dir, 'd'), [{ test: 'another pair', instrument: { ...BTC, symbol: 'ETH/USD' }, records: other.end() }], CLEAN)).toThrow(/section 8.2 checksum fails/);
+      expect(['a', 'b', 'c', 'd'].some((d) => existsSync(join(dir, d)))).toBe(false);
+      const link = join(dir, 'link-to-repo');
+      symlinkSync(repoRootPath, link);
+      const dangling = join(dir, 'dangling');
+      symlinkSync(join(repoRootPath, 'vectors-dangling-target'), dangling);
+      const inside = [
+        join(repoRootPath, 'out', 'vectors-in'),
+        join(repoRootPath, '..vectors'),
+        join('out', 'vectors-relative'),
+        join(link, 'vectors-via-link'),
+      ];
+      for (const target of inside) expect(() => exportVectors(target, sample(), CLEAN), target).toThrow(/must be outside the repository/);
+      // A '..' segment is refused before anything is resolved: after a link, path.resolve and the file system would read it
+      // differently (a link to the repository's tests directory, then '..', names the repository itself).
+      const testsLink = join(dir, 'link-to-tests');
+      symlinkSync(join(repoRootPath, 'tests'), testsLink);
+      mkdirSync(join(dir, 'victim-dir'));
+      writeFileSync(join(dir, 'victim-dir', 'keep.txt'), 'x');
+      for (const target of [`${repoRootPath}${sep}tests${sep}..${sep}out${sep}vectors-dots`, `${testsLink}${sep}..${sep}victim-dir`, `${testsLink}${sep}..${sep}leak${sep}x`, `a${sep}..${sep}..${sep}vectors-up`, `${dir}${sep}..`]) {
+        expect(() => exportVectors(target, sample(), CLEAN), target).toThrow(/must not contain a '\.\.' segment/);
+      }
+      expect(readdirSync(join(dir, 'victim-dir'))).toEqual(['keep.txt']);
+      // A dangling link on the path, as the target or above it, is refused whatever it points at.
+      for (const target of [dangling, join(dangling, 'sub')]) expect(() => exportVectors(target, sample(), CLEAN), target).toThrow(/cannot be resolved/);
+      for (const leaked of ['out/vectors-in', '..vectors', 'out/vectors-dots', 'out/vectors-relative', 'vectors-via-link', 'vectors-dangling-target', 'victim-dir', 'leak', 'a']) {
+        expect(existsSync(join(repoRootPath, leaked)), leaked).toBe(false);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes only into a new or empty real directory, creating each file exclusively: a planted link or hard link is never written through', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-vectors-'));
+    try {
+      const victim = join(dir, 'victim.txt');
+      writeFileSync(victim, 'unchanged\n');
+      const planted = join(dir, 'planted-link');
+      mkdirSync(planted);
+      symlinkSync(victim, join(planted, '000.jsonl'));
+      const hard = join(dir, 'planted-hardlink');
+      mkdirSync(hard);
+      linkSync(victim, join(hard, '000.jsonl'));
+      const full = join(dir, 'not-empty');
+      mkdirSync(full);
+      writeFileSync(join(full, 'other.txt'), 'x');
+      const fileTarget = join(dir, 'a-file');
+      writeFileSync(fileTarget, 'x');
+      const dirLink = join(dir, 'dir-link');
+      mkdirSync(join(dir, 'real-empty'));
+      symlinkSync(join(dir, 'real-empty'), dirLink);
+      for (const target of [planted, hard, full, fileTarget, dirLink, `${dirLink}${sep}`, `${dirLink}${sep}.`]) expect(() => exportVectors(target, sample(), CLEAN), target).toThrow(/new directory or an existing empty one/);
+      expect(readFileSync(victim, 'utf8')).toBe('unchanged\n');
+      expect(readdirSync(join(dir, 'real-empty'))).toEqual([]);
+      // Accepted: a new directory, and an existing empty one; every file is a regular file with a single link.
+      for (const target of [join(dir, 'new', 'streams'), join(dir, 'real-empty')]) {
+        exportVectors(target, sample(), CLEAN);
+        expect(readdirSync(target).sort()).toEqual(['000.jsonl', 'vectors.json']);
+        for (const f of ['000.jsonl', 'vectors.json']) {
+          const st = lstatSync(join(target, f));
+          expect(st.isFile() && st.nlink === 1, f).toBe(true);
+        }
+        // A second export into the same directory is refused: it is no longer empty.
+        expect(() => exportVectors(target, sample(), CLEAN)).toThrow(/new directory or an existing empty one/);
+      }
+      expect(statSync(victim).nlink).toBe(2);
+      expect(readFileSync(victim, 'utf8')).toBe('unchanged\n');
+      // The second layer on its own: each file is created exclusively, so a link or hard link that appears in the
+      // directory after the emptiness check is not written through either.
+      for (const path of [join(planted, '000.jsonl'), join(hard, '000.jsonl')]) expect(() => writeNew(path, 'raw'), path).toThrow(/EEXIST/);
+      expect(readFileSync(victim, 'utf8')).toBe('unchanged\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves no vector when a write fails: it removes the files the export wrote, and the directories it made', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'capture-vectors-'));
+    try {
+      // The third stream cannot be serialized (a BigInt), so its write fails after two files were written.
+      const streams = [...sample(), ...sample(), { test: 'unwritable', instrument: BTC, records: [{ type: 'note', recvWallMs: 1n } as unknown as RawRecord] }];
+      const fresh = join(dir, 'fresh', 'nested', 'streams');
+      expect(() => exportVectors(fresh, streams, CLEAN)).toThrow(/BigInt/);
+      expect(readdirSync(dir)).toEqual([]);
+      const empty = join(dir, 'empty');
+      mkdirSync(empty);
+      expect(() => exportVectors(empty, streams, CLEAN)).toThrow(/BigInt/);
+      expect(readdirSync(empty)).toEqual([]);
+      expect(readdirSync(dir)).toEqual(['empty']);
+      const system = exportIo.writeSync;
+      const three = (): typeof judged => [...sample(), ...sample(), ...sample()];
+      try {
+        // A write that fails after its file exists (a full disk, say) leaves no file either, and its error is the one
+        // thrown; so does a write that stores nothing.
+        let calls = 0;
+        exportIo.writeSync = (fd, buffer, offset, length) => {
+          if (++calls === 2) {
+            system(fd, buffer, offset, Math.min(length, 10));
+            throw new Error('ENOSPC: no space left on device (simulated)');
+          }
+          return system(fd, buffer, offset, length);
+        };
+        for (const target of [join(dir, 'full', 'streams'), empty]) {
+          calls = 0;
+          expect(() => exportVectors(target, three(), CLEAN), target).toThrow(/ENOSPC/);
+        }
+        exportIo.writeSync = (fd, buffer, offset, length) => (++calls === 2 ? 0 : system(fd, buffer, offset, length));
+        calls = 0;
+        expect(() => exportVectors(join(dir, 'stuck', 'streams'), three(), CLEAN)).toThrow(/stored nothing/);
+        // A file another process puts in the directory meanwhile is left alone, and the export still reports its own error.
+        const raced = join(dir, 'raced', 'streams');
+        exportIo.writeSync = (fd, buffer, offset, length) => {
+          if (++calls === 2) {
+            writeFileSync(join(raced, 'foreign.txt'), 'theirs');
+            throw new Error('ENOSPC: no space left on device (simulated)');
+          }
+          return system(fd, buffer, offset, length);
+        };
+        calls = 0;
+        expect(() => exportVectors(raced, three(), CLEAN)).toThrow(/^ENOSPC.*; removing what the export wrote also failed, so it may be left: ENOTEMPTY/);
+        expect(readdirSync(raced)).toEqual(['foreign.txt']);
+        rmSync(join(dir, 'raced'), { recursive: true, force: true });
+        expect(readdirSync(empty)).toEqual([]);
+        expect(readdirSync(dir)).toEqual(['empty']);
+        // Writes that each store only a few bytes still write every byte: the files read back whole.
+        exportIo.writeSync = (fd, buffer, offset, length) => system(fd, buffer, offset, Math.min(length, 7));
+        const short = join(dir, 'short');
+        const streams = three();
+        exportVectors(short, streams, CLEAN);
+        expect(readFileSync(join(short, '002.jsonl'), 'utf8')).toBe(streams[2]!.records.map((r) => JSON.stringify(r) + '\n').join(''));
+        expect((JSON.parse(readFileSync(join(short, 'vectors.json'), 'utf8')) as unknown[]).length).toBe(3);
+        // A close that fails is an error too: after a failed write the write's error is reported, after good writes the
+        // close's, and either way nothing is left.
+        exportIo.writeSync = system;
+        const close = exportIo.closeSync;
+        try {
+          exportIo.closeSync = (fd) => {
+            close(fd);
+            throw new Error('EIO: i/o error, close (simulated)');
+          };
+          expect(() => exportVectors(join(dir, 'closed', 'streams'), three(), CLEAN)).toThrow(/EIO: i\/o error, close/);
+          exportIo.writeSync = () => {
+            throw new Error('ENOSPC: no space left on device (simulated)');
+          };
+          expect(() => exportVectors(join(dir, 'both', 'streams'), three(), CLEAN)).toThrow(/^ENOSPC/);
+        } finally {
+          exportIo.closeSync = close;
+        }
+        expect(readdirSync(dir).sort()).toEqual(['empty', 'short']);
+      } finally {
+        exportIo.writeSync = system;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads what a run did from its tasks: a failed test, and a test it did not run unless only the export uses it', () => {
+    const test = (name: string, mode: string, state?: string): unknown => ({ type: 'test', name, mode, result: state === undefined ? undefined : { state } });
+    const [harness] = [...EXPORT_HARNESS];
+    const file = {
+      type: 'suite',
+      tasks: [
+        test('passes', 'run', 'pass'),
+        { type: 'suite', tasks: [test('fails', 'run', 'fail'), test('filtered out', 'skip'), test('todo', 'todo')] },
+        test(harness!, 'skip'),
+        test('never ran', 'run'),
+        test(harness!, 'run', 'fail'),
+        test(harness!, 'run'),
+      ],
+    } as unknown as RunnerTask;
+    // A harness test is excused only when it is skipped: one that failed or never ran counts like any other.
+    expect(runOutcome(file)).toEqual({ failed: ['fails', harness], skipped: ['filtered out', 'todo', 'never ran', harness] });
+  });
+
+  it.skipIf(process.env.CAPTURE_VECTORS_OUT !== undefined)('writes every stream the reference judges when CAPTURE_VECTORS_OUT names a directory outside the repository, end to end', () => {
     const dir = mkdtempSync(join(tmpdir(), 'capture-vectors-'));
     try {
       const out = join(dir, 'streams');
       const vitest = join(repoRootPath, 'node_modules', '.bin', 'vitest');
-      const run = (target: string): void => {
-        execFileSync(vitest, ['run', 'tests/capture-structure.test.ts', '-t', 'refuses a second manifest_start'], { cwd: repoRootPath, env: { ...process.env, CAPTURE_VECTORS_OUT: target }, stdio: 'pipe' });
+      /** Runs this file, whole or filtered, with CAPTURE_VECTORS_OUT set: '' when it passes, else what it printed. */
+      const run = (target: string, filter?: string, env: Record<string, string> = {}): string => {
+        try {
+          execFileSync(vitest, ['run', 'tests/capture-structure.test.ts', ...(filter === undefined ? [] : ['-t', filter])], { cwd: repoRootPath, env: { ...process.env, ...env, CAPTURE_VECTORS_OUT: target }, stdio: 'pipe' });
+          return '';
+        } catch (e) {
+          const { stdout, stderr } = e as { stdout?: Buffer; stderr?: Buffer };
+          return `${stdout?.toString() ?? ''}${stderr?.toString() ?? ''}` || 'the run failed';
+        }
       };
-      run(out);
+      expect(run(out)).toBe('');
       const index = JSON.parse(readFileSync(join(out, 'vectors.json'), 'utf8')) as { file: string; test: string; instrument: SelectedInstrument }[];
-      expect(index).toEqual([{ file: '000.jsonl', test: expect.stringMatching(/refuses a second manifest_start/), instrument: BTC }]);
-      const text = readFileSync(join(out, '000.jsonl'), 'utf8');
-      const records = text.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l) as RawRecord);
-      expect(records.map((r) => JSON.stringify(r) + '\n').join('')).toBe(text);
-      schemaValid(records);
-      expect(analyzeCaptureReference(records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/a second manifest_start/) });
-      // A directory inside the repository is refused, whatever its name or the link that leads to it, and nothing is
-      // written: the streams are raw capture records, which A10 refuses in the tree.
+      expect(readdirSync(out).sort()).toEqual([...index.map((v) => v.file), 'vectors.json'].sort());
+      const streams = index.map((v, k) => {
+        expect(v.file).toBe(`${String(k).padStart(3, '0')}.jsonl`);
+        const text = readFileSync(join(out, v.file), 'utf8');
+        const records = text.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l) as RawRecord);
+        expect(records.map((r) => JSON.stringify(r) + '\n').join('')).toBe(text);
+        schemaValid(records);
+        return { test: v.test, instrument: v.instrument, records };
+      });
+      // Every stream, read back from disk, verifies as section 8.2 replays it, and as many reach segments and clocks as
+      // the vectors give the reference in this process.
+      expectReach(streams, 'the exported streams');
+      const refused = streams.find((s) => /refuses a second manifest_start/.test(s.test))!;
+      expect(analyzeCaptureReference(refused.records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/a second manifest_start/) });
+      // The clock vector: a normalizer opens a segment at the first verified update inside the socket's window, and that
+      // segment owns three samples.
+      const clock = streams.find((s) => /computes the estimate exactly/.test(s.test))!;
+      const replay = replayBookChecksums(clock.records);
+      expect(replay.failed).toEqual([]);
+      const report = analyzeCaptureReference(clock.records, BTC);
+      const socket = report.sockets[0]!;
+      const [from, to] = socket.window!;
+      const first = replay.verified.find((i) => replay.updates.includes(i) && i >= from && i <= to)!;
+      const last = Math.max(...replay.verified.filter((i) => i <= to));
+      expect(clockEstimate(clock.records, ownedClockSamples(clock.records, socket, first, last))).toEqual({ samples: 3, medianMs: '45.025', medianRttMs: '29.950', maxAbsMs: '55.025', resolutionMs: 1, source: 'ws_method_response' });
+      // Refused end to end, each for its own reason, writing nothing: a filtered run, a run in which a test failed, an
+      // empty value, and a directory inside the repository, also through a link.
+      const filtered = join(dir, 'filtered');
+      expect(run(filtered, 'refuses a second manifest_start')).toMatch(/test\(s\) did not run/);
+      const failing = join(dir, 'after-a-failure');
+      // A failure is refused before a filter is: this filtered run fails the self-test, and that is the reason given.
+      expect(run(failing, 'refuses a second manifest_start|export self-test: a failing test', { CAPTURE_VECTORS_SELFTEST_FAIL: '1' })).toMatch(/1 test\(s\) failed \(export self-test: a failing test\)/);
+      expect(run('', 'refuses a second manifest_start')).toMatch(/set but empty/);
       const link = join(dir, 'link-to-repo');
       symlinkSync(repoRootPath, link);
       for (const inside of [join(repoRootPath, 'out', 'vectors'), join(repoRootPath, '..vectors'), join(link, 'vectors-via-link')]) {
-        expect(() => run(inside), inside).toThrow();
+        expect(run(inside, 'refuses a second manifest_start'), inside).toMatch(/must be outside the repository/);
       }
-      expect(existsSync(join(repoRootPath, 'out', 'vectors'))).toBe(false);
-      expect(existsSync(join(repoRootPath, '..vectors'))).toBe(false);
-      expect(existsSync(join(repoRootPath, 'vectors-via-link'))).toBe(false);
+      expect(existsSync(filtered) || existsSync(failing)).toBe(false);
+      for (const leaked of ['out/vectors', '..vectors', 'vectors-via-link']) expect(existsSync(join(repoRootPath, leaked)), leaked).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }, 180_000);
+});
+
+// Last in this file, so that it sees every stream the vectors above gave the reference.
+describe('every stream the vectors give the reference (handoff A7(r)): valid checksums, and segments and clocks reached', () => {
+  it('carries the section 8.2 checksum on every book frame, and reaches segment windows and clock ownership on many streams', () => {
+    // A -t filter that selects this test alone leaves it no streams: it needs the vectors above to have run.
+    expectReach([...judged], 'run the whole file: this test checks the streams the vectors above built');
   });
 });

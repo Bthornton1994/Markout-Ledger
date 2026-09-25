@@ -64,7 +64,7 @@
             "trade": { "count": 7000, "min": 1, "p1": 2, "p50": 12, "p99": 80, "max": 350 }
           },
           "integrity": { "checksumsVerified": 180001, "checksumMismatches": 0 },
-          "visibleSpanBps": { "bid": { "p1": 3.1, "p50": 9.4 }, "ask": { "p1": 3.0, "p50": 9.1 } },
+          "visibleSpanBps": { "bid": { "p1": 3, "p50": 9 }, "ask": { "p1": 3, "p50": 9 } },
           "tradeIdJumps": 0,
           "venueStatus": [],
           "dropped": { "depthBeforeSnapshot": 0, "tradeSnapshotHistory": 0, "exponentLexemeInBook": 0 },
@@ -140,7 +140,7 @@
             "trade": { "count": 2000, "min": 2, "p1": 3, "p50": 14, "p99": 85, "max": 360 }
           },
           "integrity": { "checksumsVerified": 46001, "checksumMismatches": 1 },
-          "visibleSpanBps": { "bid": { "p1": 4.2, "p50": 11.8 }, "ask": { "p1": 4.0, "p50": 11.5 } },
+          "visibleSpanBps": { "bid": { "p1": 4, "p50": 11 }, "ask": { "p1": 4, "p50": 11 } },
           "tradeIdJumps": 0,
           "venueStatus": [{ "record": { "fileIndex": 0, "record": 40000, "element": 0 }, "source": "status", "value": "post_only" }],
           "dropped": { "depthWhileUnsynced": 12 },

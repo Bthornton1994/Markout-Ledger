@@ -171,6 +171,12 @@ describe('capture-record.v1 schema', () => {
       expected: [{ instancePath: '/files/0/records', keyword: 'minimum' }],
     },
     {
+      name: 'manifest_end listing no file (the hash of every file is repeated there, section 3)',
+      from: 'manifest_end',
+      mutate: (d) => (d.files = []),
+      expected: [{ instancePath: '/files', keyword: 'minItems', params: { limit: 1 } }],
+    },
+    {
       name: 'a record without receive clocks',
       from: 'note',
       mutate: (d) => {
@@ -587,7 +593,10 @@ describe('fixture.v2 schema', () => {
       from: 'header_recorded_qty6',
       target: fixtureHeader,
       mutate: (d) => (d.provenance.capture.integrity.checksumMismatches = 2),
-      expected: [{ instancePath: '/provenance/capture/integrity/checksumMismatches', keyword: 'maximum', params: { limit: 1 } }],
+      expected: [
+        { instancePath: '/provenance/capture/integrity/checksumMismatches', keyword: 'const', params: { allowedValue: 1 } },
+        { instancePath: '/provenance/capture/integrity/checksumMismatches', keyword: 'maximum', params: { limit: 1 } },
+      ],
     },
     {
       name: 'a segment end reason outside the contract list',
@@ -678,6 +687,133 @@ describe('fixture.v2 schema', () => {
       target: fixtureTrade,
       mutate: (d) => (d.obsTime = 1791288001130.5),
       expected: [{ instancePath: '/obsTime', keyword: 'type', params: { type: 'integer' } }],
+    },
+    // The bounds manifest_end.files carries (contract section 4.1), on the same entries in the header (section 6.1).
+    {
+      name: 'a raw file entry with a negative fileIndex',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.rawFiles[0].fileIndex = -1),
+      expected: [{ instancePath: '/provenance/capture/rawFiles/0/fileIndex', keyword: 'minimum', params: { limit: 0 } }],
+    },
+    {
+      name: 'a raw file entry with no records',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.rawFiles[1].records = 0),
+      expected: [{ instancePath: '/provenance/capture/rawFiles/1/records', keyword: 'minimum', params: { limit: 1 } }],
+    },
+    // Section 5.3: each event's span is a floor in integer arithmetic, and a nearest-rank percentile is one of them.
+    {
+      name: 'a visible span percentile that is not an integer',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.visibleSpanBps.ask.p50 = 11.5),
+      expected: [{ instancePath: '/provenance/capture/visibleSpanBps/ask/p50', keyword: 'type', params: { type: 'integer' } }],
+    },
+    {
+      name: 'a visible span first percentile that is not an integer',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.visibleSpanBps.bid.p1 = 3.1),
+      expected: [{ instancePath: '/provenance/capture/visibleSpanBps/bid/p1', keyword: 'type', params: { type: 'integer' } }],
+    },
+    // Section 5.9 R5: a pair that is not online at capture start is refused, and the header keeps that specification.
+    {
+      name: 'an instrument specification whose status is not online',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.instrumentSpec.status = 'delisted'),
+      expected: [{ instancePath: '/provenance/instrumentSpec/status', keyword: 'const', params: { allowedValue: 'online' } }],
+    },
+    // Sections 5.5 and 6.1: sizes carry decimalsOf(qtyScale) places, and R5 refuses more quantity decimals than that.
+    {
+      name: 'a lot size with eight places at qtyScale 1000000',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.lotSize = '0.00000001'),
+      expected: [{ instancePath: '/lotSize', keyword: 'pattern' }],
+    },
+    {
+      name: 'an instrument with eight quantity decimals at qtyScale 1000000',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.instrumentSpec.qtyDecimals = 8),
+      expected: [{ instancePath: '/provenance/instrumentSpec/qtyDecimals', keyword: 'maximum', params: { limit: 6 } }],
+    },
+    {
+      name: 'a lot size with six places at qtyScale 100000000',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.lotSize = '0.000001'),
+      expected: [{ instancePath: '/lotSize', keyword: 'pattern' }],
+    },
+    // Section 5.6: a millisecond estimate needs three samples at resolution 1, a coarse one a probe at resolution 1000,
+    // and a segment with neither is refused, so no header says none.
+    {
+      name: 'a venue clock offset whose source is none',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.venueClockOffsetMs.source = 'none'),
+      expected: [{ instancePath: '/provenance/capture/venueClockOffsetMs/source', keyword: 'enum' }],
+    },
+    {
+      name: 'a millisecond clock estimate at second resolution',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.venueClockOffsetMs.resolutionMs = 1000),
+      expected: [{ instancePath: '/provenance/capture/venueClockOffsetMs/resolutionMs', keyword: 'const', params: { allowedValue: 1 } }],
+    },
+    {
+      name: 'a millisecond clock estimate from two samples',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.venueClockOffsetMs.samples = 2),
+      expected: [{ instancePath: '/provenance/capture/venueClockOffsetMs/samples', keyword: 'minimum', params: { limit: 3 } }],
+    },
+    {
+      name: 'a coarse clock estimate at millisecond resolution',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.venueClockOffsetMs.resolutionMs = 1),
+      expected: [{ instancePath: '/provenance/capture/venueClockOffsetMs/resolutionMs', keyword: 'const', params: { allowedValue: 1000 } }],
+    },
+    {
+      name: 'a coarse clock estimate from no probe',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.venueClockOffsetMs.samples = 0),
+      expected: [{ instancePath: '/provenance/capture/venueClockOffsetMs/samples', keyword: 'minimum', params: { limit: 1 } }],
+    },
+    // Section 6.1: integrity.checksumMismatches is 1 for a checksum_mismatch segment and 0 otherwise.
+    {
+      name: 'a checksum_mismatch segment that counts no mismatch',
+      from: 'header_recorded_qty6',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.integrity.checksumMismatches = 0),
+      expected: [{ instancePath: '/provenance/capture/integrity/checksumMismatches', keyword: 'const', params: { allowedValue: 1 } }],
+    },
+    {
+      name: 'a capture_end segment that counts a mismatch',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.integrity.checksumMismatches = 1),
+      expected: [{ instancePath: '/provenance/capture/integrity/checksumMismatches', keyword: 'const', params: { allowedValue: 0 } }],
+    },
+    // Section 6.1: the normalizer's name is markout-ledger, as in the normalize report.
+    {
+      name: 'a recorded header naming another normalizer',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.provenance.capture.normalizer.name = 'other-normalizer'),
+      expected: [{ instancePath: '/provenance/capture/normalizer/name', keyword: 'const', params: { allowedValue: 'markout-ledger' } }],
+    },
+    {
+      name: 'a header depth above the bound the normalize report puts on options.depth',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => (d.depth = 1001),
+      expected: [{ instancePath: '/depth', keyword: 'maximum', params: { limit: 1000 } }],
     },
   ];
 

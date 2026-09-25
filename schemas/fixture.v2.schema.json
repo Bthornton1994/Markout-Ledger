@@ -29,7 +29,7 @@
       }
     },
     "lagStats": { "type": "object", "required": ["count", "min", "p1", "p50", "p99", "max"], "properties": { "count": { "type": "integer", "minimum": 0 }, "min": { "type": "integer" }, "p1": { "type": "integer" }, "p50": { "type": "integer" }, "p99": { "type": "integer" }, "max": { "type": "integer" } } },
-    "spanStats": { "type": "object", "required": ["p1", "p50"], "properties": { "p1": { "type": "number", "minimum": 0 }, "p50": { "type": "number", "minimum": 0 } }, "description": "distance in basis points from mid to the worst emitted level on one side, percentiles over book events" },
+    "spanStats": { "type": "object", "required": ["p1", "p50"], "properties": { "p1": { "type": "integer", "minimum": 0 }, "p50": { "type": "integer", "minimum": 0 } }, "description": "distance in basis points from mid to the worst emitted level on one side, percentiles over book events: integers, since each event's distance is a floor in integer arithmetic and a nearest-rank percentile is one of them (contract section 5.3)" },
     "rawRef": { "type": "object", "required": ["fileIndex", "record", "element"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "record": { "type": "integer", "minimum": 0 }, "element": { "type": "integer", "minimum": 0 } } },
     "instrumentSpec": {
       "type": "object",
@@ -43,7 +43,7 @@
         "costDecimals": { "type": "integer", "minimum": 0 },
         "qtyMin": { "$ref": "#/$defs/plainDecimal" },
         "costMin": { "$ref": "#/$defs/plainDecimal" },
-        "status": { "type": "string" },
+        "status": { "const": "online", "description": "the pair's status at capture start: R5 refuses a capture whose pair is not online then (contract section 5.9), and the header keeps the start-of-capture specification (section 8.4)" },
         "aggressorSource": { "enum": ["maker_flag", "taker_side", "none"] },
         "tradeStreamGranularity": { "enum": ["per_fill", "aggregated"] },
         "tradeIdOrdered": { "type": "boolean" },
@@ -55,16 +55,24 @@
     "capture": {
       "type": "object",
       "required": ["captureId", "captureFormatVersion", "rawFiles", "segmentIndex", "startReason", "endReason", "endRawRecord", "capturer", "normalizer", "adapter", "clockSync", "clockReports", "venueClockOffsetMs", "lagStatsMs", "integrity", "visibleSpanBps", "tradeIdJumps", "venueStatus", "dropped", "cuts"],
+      "allOf": [
+        {
+          "description": "integrity.checksumMismatches is 1 for a checksum_mismatch segment and 0 otherwise (contract section 6.1)",
+          "if": { "properties": { "endReason": { "const": "checksum_mismatch" } }, "required": ["endReason"] },
+          "then": { "type": "object", "properties": { "integrity": { "type": "object", "properties": { "checksumMismatches": { "const": 1 } } } } },
+          "else": { "type": "object", "properties": { "integrity": { "type": "object", "properties": { "checksumMismatches": { "const": 0 } } } } }
+        }
+      ],
       "properties": {
         "captureId": { "type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "a lower-case UUID version 4 (contract section 3)" },
         "captureFormatVersion": { "const": 1 },
-        "rawFiles": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
+        "rawFiles": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer", "minimum": 1 } } }, "description": "the raw files as manifest_end.files lists them, with the same bounds" },
         "segmentIndex": { "type": "integer", "minimum": 0 },
         "startReason": { "enum": ["capture_start", "resync_after_gap", "resync_after_clock_cut"] },
         "endReason": { "enum": ["capture_end", "checksum_mismatch", "snapshot_reset", "gap_sequence", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth"] },
         "endRawRecord": { "type": "object", "required": ["fileIndex", "record"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "record": { "type": "integer", "minimum": 0 } } },
         "capturer": { "$ref": "#/$defs/softwareWithCommit" },
-        "normalizer": { "$ref": "#/$defs/softwareWithCommit" },
+        "normalizer": { "$ref": "#/$defs/softwareWithCommit", "type": "object", "properties": { "name": { "const": "markout-ledger", "description": "as in the normalize report (contract sections 5.10 and 6.1)" } } },
         "adapter": { "$ref": "#/$defs/software" },
         "clockSync": { "enum": ["synchronized", "unknown"] },
         "clockReports": { "type": "object", "required": ["start", "end"], "additionalProperties": false, "properties": { "start": { "$ref": "#/$defs/clock" }, "end": { "$ref": "#/$defs/clock" } }, "description": "closed to unknown keys: only start and end, each a closed clock block (contract section 4.2)" },
@@ -77,8 +85,13 @@
             "medianRttMs": { "type": "number" },
             "maxAbsMs": { "type": "number" },
             "resolutionMs": { "enum": [1, 1000], "description": "1 for WebSocket method-response probes, 1000 for the REST Time fallback" },
-            "source": { "enum": ["ws_method_response", "rest_time", "none"] }
-          }
+            "source": { "enum": ["ws_method_response", "rest_time"], "description": "a segment that owns neither kind of sample records source none and is refused (R2b), so no written header carries it (contract section 5.6)" }
+          },
+          "allOf": [
+            { "if": { "properties": { "source": { "const": "ws_method_response" } }, "required": ["source"] }, "then": { "type": "object", "properties": { "samples": { "type": "integer", "minimum": 3 }, "resolutionMs": { "const": 1 } } } },
+            { "if": { "properties": { "source": { "const": "rest_time" } }, "required": ["source"] }, "then": { "type": "object", "properties": { "samples": { "type": "integer", "minimum": 1 }, "resolutionMs": { "const": 1000 } } } }
+          ],
+          "description": "at least 3 millisecond samples at resolution 1, or at least one probe at resolution 1000 (contract section 5.6)"
         },
         "lagStatsMs": { "type": "object", "required": ["book", "trade"], "properties": { "book": { "$ref": "#/$defs/lagStats" }, "trade": { "$ref": "#/$defs/lagStats" } } },
         "integrity": { "type": "object", "required": ["checksumsVerified", "checksumMismatches"], "properties": { "checksumsVerified": { "type": "integer", "minimum": 0 }, "checksumMismatches": { "type": "integer", "minimum": 0, "maximum": 1, "description": "1 only for a segment ended by checksum_mismatch" } } },
@@ -151,7 +164,7 @@
         "eventCount": { "type": "integer", "minimum": 0 },
         "synthetic": { "type": "boolean" },
         "syntheticLabel": { "type": "string" },
-        "depth": { "type": "integer", "minimum": 1 },
+        "depth": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "levels emitted per book event: the normalize report's options.depth, with the same bound" },
         "provenance": { "$ref": "#/$defs/provenance" }
       },
       "allOf": [
@@ -189,6 +202,18 @@
               "provenance": { "type": "object", "properties": { "source": { "const": "synthetic" } } }
             }
           }
+        },
+        {
+          "description": "sizes are written with decimalsOf(qtyScale) places, and R5 refuses an instrument whose qtyDecimals exceed them (contract sections 5.5 and 6.1)",
+          "if": { "properties": { "qtyScale": { "const": 1000000 } }, "required": ["qtyScale"] },
+          "then": {
+            "type": "object",
+            "properties": {
+              "lotSize": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{6}$" },
+              "provenance": { "type": "object", "properties": { "instrumentSpec": { "type": "object", "properties": { "qtyDecimals": { "type": "integer", "maximum": 6 } } } } }
+            }
+          },
+          "else": { "type": "object", "properties": { "lotSize": { "type": "string", "pattern": "^[0-9]+\\.[0-9]{8}$" } } }
         }
       ]
     },
