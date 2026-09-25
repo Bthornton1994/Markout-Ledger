@@ -6,16 +6,18 @@
 // case shows only that the rights block has the required shape. It establishes no permission; the owner verifies the
 // attested clearance by hand before any recorded fixture is committed (decision condition C2).
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   canonicalReport,
   classifyJsonl,
   classifyNormalizeReport,
   classifyOtherFile,
+  classifyOtherEntry,
   classifyOtherPath,
+  gitPathText,
   classifyRepoPath,
   classifyTrackedFile,
   historyViolations,
@@ -23,6 +25,7 @@ import {
   tagMessageViolations,
   repoRootPath,
   trackedHygieneFiles,
+  trackedOtherEntries,
   trackedOtherFiles,
 } from './jsonl-policy.js';
 
@@ -46,6 +49,7 @@ function withTrade(change: (trade: Json) => void): string {
 const fixtureExamples = readJson('schemas/examples/fixture.v2.examples.json').examples as Record<string, Json>;
 const captureExamples = readJson('schemas/examples/capture-record.v1.examples.json').examples as Record<string, Json>;
 const reportExamples = readJson('schemas/examples/normalize-report.v1.examples.json').examples as Record<string, Json>;
+const fixtureSchema = readJson('schemas/fixture.v2.schema.json');
 /** The only name a tracked report of the example capture may have (contract section 6.5). */
 const REPORT_NAME = `${reportExamples.report_segments!.captureId}.normalize-report.json`;
 const report = (change: (r: Json) => void = () => {}): string => {
@@ -91,9 +95,9 @@ describe('A10: every tracked file the rule covers is allowed (fail closed)', () 
   });
 
   it('finds no raw capture record on a line of its own in any other tracked text file, whatever its name', () => {
-    const other = trackedOtherFiles();
-    expect(other).toEqual(expect.arrayContaining(['README.md', 'package.json', 'schemas/examples/capture-record.v1.examples.json']));
-    expect(other.map((path) => ({ path, verdict: classifyOtherPath(path) })).filter((f) => !f.verdict.ok)).toEqual([]);
+    const other = trackedOtherEntries();
+    expect(other.map((e) => e.path)).toEqual(expect.arrayContaining(['README.md', 'package.json', 'schemas/examples/capture-record.v1.examples.json']));
+    expect(other.map((e) => ({ path: e.path, verdict: classifyOtherEntry(e) })).filter((f) => !f.verdict.ok)).toEqual([]);
   });
 
   it('ships the pre-push hook executable (git skips a hook that is not, and the push goes through)', () => {
@@ -221,7 +225,7 @@ describe('A10 file listing (the tree under test)', () => {
     });
   });
 
-  it('ends lines at CR LF, LF and CR, also tries the parts between VT, FF, NEL, U+2028 and U+2029, and trims control and format characters and marks, so none of them hides a record', () => {
+  it('ends lines at CR LF, LF and CR, also tries the parts between VT, FF, NEL, U+2028 and U+2029, and trims control and format characters, marks and every character the non-blank rule counts as invisible, so none of them hides a record', () => {
     const record = JSON.stringify(captureExamples.message_trade);
     const found = (line: number) => ({ ok: false, reason: `line ${line} holds a raw capture record, in a file the fixture rules do not cover` });
     expect(classifyOtherFile(Buffer.from(`a note\r${record}\r`))).toEqual(found(2));
@@ -242,9 +246,41 @@ describe('A10 file listing (the tree under test)', () => {
       expect(classifyOtherFile(Buffer.from(`a note\u2028${mark}${record}${mark}\u2029after\n`)), mark).toEqual(found(1));
     }
     expect(classifyOtherFile(Buffer.from('\u034f{"type":"not a record"}\ufe0f\n'))).toEqual({ ok: true, kind: 'other_text' });
+    // Every other character the schemas' non-blank rule counts as invisible (fixture.v2 $defs/nonBlank), none of which is
+    // Cc, Cf or M: the Hangul fillers and other default-ignorable letters, and the rule's listed exceptions.
+    for (const blank of ['\u115f', '\u1160', '\u3164', '\uffa0', '\u2800', '\u303f', '\ufffc', '\u{13441}', '\u{13442}', '\u{1d159}']) {
+      const name = `U+${blank.codePointAt(0)!.toString(16)}`;
+      expect(classifyOtherFile(Buffer.from(`${blank}${record}${blank}\n`)), name).toEqual(found(1));
+      expect(classifyOtherFile(Buffer.from(`a note\u2028${blank}${record}\u2029after\n`)), name).toEqual(found(1));
+    }
+    // The class is the non-blank rule's own: every code point its lookahead calls invisible is padding here.
+    const invisible = /^\(\?!\[(.*)\]\)/u.exec(fixtureSchema.$defs.nonBlank.pattern)![1]!;
+    const nonBlankInvisible = new RegExp(`^[${invisible}]$`, 'u');
+    for (let cp = 0; cp <= 0x10ffff; cp++) {
+      if (cp >= 0xd800 && cp <= 0xdfff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (nonBlankInvisible.test(ch) && !/^[\s\p{Cc}\p{Cf}\p{M}]$/u.test(ch)) {
+        expect(classifyOtherFile(Buffer.from(`${ch}${record}\n`)), `U+${cp.toString(16)}`).toEqual(found(1));
+      }
+    }
     // An RFC 7464 JSON text sequence (each record after a record separator) and a C0 control prefix.
     expect(classifyOtherFile(Buffer.from(`\x1e${record}\n\x1e${record}\n`))).toEqual(found(1));
     expect(classifyOtherFile(Buffer.from(`a note\n\x01${record}\x00\n`))).toEqual(found(2));
+  });
+
+  it('recognizes a raw capture record by its type alone or by its two clocks alone, as the contract says, and each of the other branch', () => {
+    const found = { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' };
+    // Every record type of the raw-record schema, with no clock fields: found by its type.
+    for (const type of ['manifest_start', 'file_start', 'ws_open', 'ws_close', 'ws_error', 'subscribe', 'unsubscribe', 'ping', 'message', 'probe', 'note', 'file_end', 'manifest_end']) {
+      expect(classifyOtherFile(Buffer.from(`${JSON.stringify({ type, data: 'x' })}\n`)), type).toEqual(found);
+    }
+    // Both receive clocks and no type, or a type the schema does not know: found by the clocks.
+    expect(classifyOtherFile(Buffer.from('{"recvWallMs":1,"recvMonoNs":"2"}\n'))).toEqual(found);
+    expect(classifyOtherFile(Buffer.from('{"type":"heartbeat","recvWallMs":1,"recvMonoNs":"2"}\n'))).toEqual(found);
+    // One clock alone, or a type the schema does not know, is not a record.
+    for (const text of ['{"recvWallMs":1}', '{"recvMonoNs":"2"}', '{"type":"heartbeat"}', '{"type":"MESSAGE"}']) {
+      expect(classifyOtherFile(Buffer.from(`${text}\n`)), text).toEqual({ ok: true, kind: 'other_text' });
+    }
   });
 
   it('finds a record written on one line whose string values hold NEL, U+2028 or U+2029, which JSON permits unescaped', () => {
@@ -281,6 +317,129 @@ describe('A10 file listing (the tree under test)', () => {
     const added = commitAll(root, 'track a capture through Git LFS');
     expect(classifyOtherPath('capture.bin', root)).toEqual({ ok: false, reason });
     expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual([{ commit: added, path: 'capture.bin', reason }]);
+  });
+
+  it('refuses every pointer form git-lfs decodes: its three version URLs, white space, blank and ext lines, CRLF, bytes that are not UTF-8, a pointer padded past 1024 bytes', () => {
+    // Each form is one git-lfs's own decoder (lfs/pointer.go DecodeFrom, commit 0043a64) takes for a pointer: run this
+    // file with LFS_POINTER_FORMS_OUT set to a directory outside the repository and it writes every form there, one file
+    // each, for that decoder to confirm.
+    const reason = 'a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it';
+    const oid = `oid sha256:${'a'.repeat(64)}`;
+    const ext = `ext-0-foo sha256:${'b'.repeat(64)}`;
+    const body = (version: string, eol = '\n'): string => [`version ${version}`, oid, 'size 42'].join(eol) + eol;
+    const canonical = body('https://git-lfs.github.com/spec/v1');
+    const forms: Record<string, Buffer> = {
+      canonical: Buffer.from(canonical),
+      hawser: Buffer.from(body('https://hawser.github.com/spec/v1')),
+      git_media_alpha: Buffer.from(body('http://git-media.io/v/2')),
+      crlf: Buffer.from(body('https://git-lfs.github.com/spec/v1', '\r\n')),
+      no_final_newline: Buffer.from(canonical.slice(0, -1)),
+      blank_line_after_version: Buffer.from(canonical.replace('\n', '\n\n')),
+      ext_before_version: Buffer.from(`${ext}\n${canonical}`),
+      blank_line_after_ext: Buffer.from(`${ext}\n\n${canonical}`),
+      crlf_blank_line_after_ext: Buffer.from(`${ext}\r\n\r\n${body('https://git-lfs.github.com/spec/v1', '\r\n')}`),
+      ext_key_not_utf8: Buffer.concat([Buffer.from('ext-0-fo'), Buffer.from([0xff]), Buffer.from(` sha256:${'b'.repeat(64)}\n${canonical}`)]),
+      padded_past_1024_bytes: Buffer.from(canonical + '\n'.repeat(2000)),
+      ...Object.fromEntries(
+        Object.entries({ lf: '\n', crlf: '\r\n', spaces: '   ', tab: '\t', vt_ff: '\v\f', nel: '\u0085', nbsp: '\u00a0', ideographic_space: '\u3000' }).map(([n, lead]) => [`leading_${n}`, Buffer.from(lead + canonical)]),
+      ),
+    };
+    for (const [name, bytes] of Object.entries(forms)) expect(classifyOtherFile(bytes), name).toEqual({ ok: false, reason });
+    // Near forms git-lfs rejects, refused all the same, since the check reads each line with the white space around it and
+    // between its words trimmed and so fails closed on a file that only begins like a pointer.
+    for (const [name, text] of Object.entries({
+      trailing_space: canonical.replace('spec/v1\n', 'spec/v1 \n'),
+      tab_separator: canonical.replace('version ', 'version\t'),
+      indented_after_ext: `${ext}\n  ${canonical}`,
+    })) expect(classifyOtherFile(Buffer.from(text)), name).toEqual({ ok: false, reason });
+    // Not pointers to git-lfs, and not refused as one: the version line is not the first line that is neither blank nor an
+    // extension, or the URL is not one git-lfs accepts.
+    for (const text of [`not a pointer\n${canonical}`, 'see version https://git-lfs.github.com/spec/v1 for the format\n', body('https://git-lfs.github.com/spec/v2')]) {
+      expect(classifyOtherFile(Buffer.from(text)), text).toEqual({ ok: true, kind: 'other_text' });
+    }
+    const out = process.env.LFS_POINTER_FORMS_OUT;
+    if (out !== undefined) {
+      const rel = relative(realpathSync(repoRootPath), realpathSync(dirname(out)));
+      if (!(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))) throw new Error(`LFS_POINTER_FORMS_OUT must be outside the repository: ${out}`);
+      mkdirSync(out, { recursive: true });
+      for (const [name, bytes] of Object.entries(forms)) writeFileSync(join(out, name), bytes);
+    }
+    // In the tree and in the history, which read the same check.
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    const base = commitAll(root, 'base');
+    writeFileSync(join(root, 'alpha.dat'), forms.git_media_alpha!);
+    writeFileSync(join(root, 'padded.dat'), forms.padded_past_1024_bytes!);
+    writeFileSync(join(root, 'ext.bin'), forms.ext_key_not_utf8!);
+    const added = commitAll(root, 'pointers git-lfs decodes');
+    for (const path of ['alpha.dat', 'padded.dat', 'ext.bin']) expect(classifyOtherPath(path, root), path).toEqual({ ok: false, reason });
+    expect(historyViolations(root, [`${base}..HEAD`]).violations).toEqual(['alpha.dat', 'ext.bin', 'padded.dat'].map((path) => ({ commit: added, path, reason })));
+  });
+
+  it('reads every tracked entry outside the kinds or refuses it: a name that is not UTF-8, a skip-worktree entry, a file missing from disk, an unstaged change, an unreadable blob', () => {
+    const record = JSON.stringify(captureExamples.message_trade) + '\n';
+    const found = { ok: false, reason: 'line 1 holds a raw capture record, in a file the fixture rules do not cover' };
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic, 'clean.txt': 'nothing here\n', 'edited.txt': 'nothing yet\n' });
+    // Written through the file system by their bytes: one name that is not UTF-8 holding a record, one holding none; and
+    // distinct bytes in each file, since the history scan reads each distinct blob once.
+    writeFileSync(Buffer.from(`${root}/raw\xff.txt`, 'latin1'), `${record}raw\n`);
+    writeFileSync(Buffer.from(`${root}/ok\xfe.txt`, 'latin1'), 'nothing here\n');
+    writeFileSync(join(root, 'skipped.txt'), `${record}skipped\n`);
+    writeFileSync(join(root, 'run.sh'), `${record}executable\n`, { mode: 0o755 });
+    writeFileSync(join(root, 'deleted.txt'), `${record}deleted\n`);
+    const base = commitAll(root, 'entries the working tree will not show by name');
+    gitIn(root, 'update-index', '--skip-worktree', 'skipped.txt');
+    rmSync(join(root, 'skipped.txt'));
+    rmSync(join(root, 'deleted.txt'));
+    writeFileSync(join(root, 'edited.txt'), record);
+    const verdicts = Object.fromEntries(trackedOtherEntries(root).map((e) => [e.path, classifyOtherEntry(e, root)]));
+    expect(verdicts).toEqual({
+      'clean.txt': { ok: true, kind: 'other_text' },
+      'deleted.txt': found,
+      'edited.txt': found,
+      'ok\\xfe.txt': { ok: true, kind: 'other_text' },
+      'raw\\xff.txt': found,
+      'run.sh': found,
+      'skipped.txt': found,
+    });
+    expect(trackedOtherEntries(root).find((e) => e.path === 'run.sh')?.mode).toBe('100755');
+    // Through the path-based interface too, which returned "not inspected" for these before.
+    for (const path of ['skipped.txt', 'deleted.txt', 'edited.txt']) expect(classifyOtherPath(path, root), path).toEqual(found);
+    expect(trackedOtherFiles(root)).toContain('raw\\xff.txt');
+    // The history scan reads the same blobs by id, and names the entry without loss.
+    expect(historyViolations(root, [base]).violations.map((v) => v.path).sort()).toEqual(['deleted.txt', 'raw\\xff.txt', 'run.sh', 'skipped.txt']);
+    // A blob git cannot read is refused in the tree, never passed unread, and the history scan fails rather than skip it.
+    const oid = gitIn(root, 'rev-parse', 'HEAD:clean.txt').trim();
+    rmSync(join(root, '.git', 'objects', oid.slice(0, 2), oid.slice(2)));
+    expect(classifyOtherPath('clean.txt', root)).toEqual({ ok: false, reason: 'a tracked entry whose blob git cannot read, so the content check cannot run' });
+    expect(() => historyViolations(root, [base])).toThrow(/cannot read blob/);
+  });
+
+  it('refuses a path that is neither in the index nor on disk, and an index entry of a mode it does not read', () => {
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic, 'clean.txt': 'nothing here\n' });
+    commitAll(root, 'base');
+    expect(classifyOtherPath('nowhere.txt', root)).toEqual({ ok: false, reason: 'a path neither in the index nor present in the working tree' });
+    const clean = trackedOtherEntries(root).find((e) => e.path === 'clean.txt')!;
+    expect(classifyOtherEntry(clean, root)).toEqual({ ok: true, kind: 'other_text' });
+    for (const mode of ['040000', '100664', '000000']) {
+      expect(classifyOtherEntry({ ...clean, mode }, root), mode).toEqual({ ok: false, reason: `an index entry of mode ${mode}, which the rule does not read` });
+    }
+  });
+
+  it('writes a name that is not UTF-8 with every high byte and every backslash escaped, so two such names never read alike', () => {
+    const high = gitPathText(Buffer.from([0x61, 0xff, 0xfe]));
+    const spelled = gitPathText(Buffer.from([0x61, 0x5c, 0x78, 0x66, 0x66, 0xfe]));
+    expect(high).toEqual({ path: 'a\\xff\\xfe', utf8: false });
+    expect(spelled).toEqual({ path: 'a\\x5cxff\\xfe', utf8: false });
+    expect(gitPathText(Buffer.from('a\\b\u00e9', 'utf8'))).toEqual({ path: 'a\\b\u00e9', utf8: true });
+  });
+
+  it('refuses a covered path whose name is not UTF-8, in the tree and in the history, rather than reading it under another name', () => {
+    const root = newRepo({ 'fixtures/synthetic-baseline.jsonl': synthetic });
+    writeFileSync(Buffer.from(`${root}/fixtures/copy\xff.jsonl`, 'latin1'), synthetic);
+    const added = commitAll(root, 'a synthetic fixture under a name that is not UTF-8');
+    expect(trackedHygieneFiles(root)).toEqual(['fixtures/copy\\xff.jsonl', 'fixtures/synthetic-baseline.jsonl']);
+    expect(classifyRepoPath('fixtures/copy\\xff.jsonl', root)).toMatchObject({ ok: false });
+    expect(historyViolations(root, [added]).violations).toEqual([{ commit: added, path: 'fixtures/copy\\xff.jsonl', reason: 'a covered path whose name is not UTF-8, which the rule cannot read by name' }]);
   });
 
   it('checks a symbolic link\'s target text and refuses a submodule entry anywhere, in the tree and in the history', () => {
@@ -481,6 +640,51 @@ describe('A10 history (every commit of a range, contract section 6.5)', () => {
     const bad = commitAll(root, 'a raw capture');
     gitIn(root, 'replace', bad, clean);
     expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit: bad, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }]);
+  });
+
+  it('scans the side branch of a merge in the range, not only the first-parent line', () => {
+    const root = newRepo({ 'README.md': 'x' });
+    const base = commitAll(root, 'base');
+    gitIn(root, 'checkout', '-q', '-b', 'side');
+    writeFileSync(join(root, 'data.jsonl'), raw);
+    const bad = commitAll(root, 'a raw capture on the side branch');
+    gitIn(root, 'rm', '-q', 'data.jsonl');
+    commitAll(root, 'delete it again on the side branch');
+    gitIn(root, 'checkout', '-q', 'main');
+    writeFileSync(join(root, 'other.txt'), 'main moves on\n');
+    commitAll(root, 'main moves on');
+    gitIn(root, ...['-c', 'user.name=a', '-c', 'user.email=a@example.invalid'], 'merge', '-q', '--no-ff', '-m', 'merge side', 'side');
+    expect(historyViolations(root, [`${base}..main`]).violations).toEqual([{ commit: bad, path: 'data.jsonl', reason: expect.stringMatching(/raw capture record/) }]);
+  });
+
+  it('exits 1 for a tag message that holds a raw record, 2 for a tag it cannot scan, and 0 for a clean one (the hook reads these codes)', () => {
+    const root = newRepo({ 'README.md': 'x' });
+    commitAll(root, 'base');
+    gitIn(root, 'tag', '-a', '-m', `release\n${JSON.stringify(captureExamples.message_trade)}`, 'v-raw');
+    gitIn(root, 'tag', '-a', '-m', 'a clean release', 'v-clean');
+    const run = (...args: string[]): { status: number; stderr: string } => {
+      try {
+        execFileSync(TSX, [HISTORY_CLI, ...args], { cwd: root, encoding: 'utf8', env: GIT_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+        return { status: 0, stderr: '' };
+      } catch (e) {
+        return { status: (e as { status: number }).status, stderr: (e as { stderr: string }).stderr };
+      }
+    };
+    expect(run('--tag', gitIn(root, 'rev-parse', 'v-clean').trim()).status).toBe(0);
+    expect(run('--tag', gitIn(root, 'rev-parse', 'v-raw').trim())).toMatchObject({ status: 1, stderr: expect.stringMatching(/A10 tag: .* \(tag message\): line 2 of the tag message holds a raw capture record/) });
+    expect(run('--tag', 'f'.repeat(40))).toMatchObject({ status: 2, stderr: expect.stringMatching(/A10 tag: the tag could not be scanned/) });
+    expect(run('--tag')).toMatchObject({ status: 2, stderr: expect.stringMatching(/give --tag <sha>; nothing was scanned/) });
+  });
+
+  it('runs the history scan in CI over every commit of the range, before the tests, from a full clone', () => {
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci).toMatch(/^on:\n {2}pull_request:\n {2}push:\n {4}branches: \[main\]\n/m);
+    expect(ci).toMatch(/- uses: actions\/checkout@v4\n {8}with:\n {10}fetch-depth: 0 /);
+    expect(ci).toContain('          A10_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}\n          A10_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}\n        run: npm run test:history -- --base "$A10_BASE" --head "$A10_HEAD"\n');
+    expect(ci.indexOf('npm run test:history')).toBeGreaterThan(ci.indexOf('- run: npm ci'));
+    expect(ci.indexOf('npm run test:history')).toBeLessThan(ci.indexOf('- run: npm test'));
+    expect(ci).not.toMatch(/continue-on-error|if: /);
+    expect(JSON.parse(read('package.json')).scripts['test:history']).toBe('tsx tests/a10-history-cli.ts');
   });
 
   it('reads the commit header as well as the message: a raw record in a mergetag header is found', () => {
@@ -825,6 +1029,36 @@ describe('A10 opt-in pre-push hook (.githooks/pre-push, contract section 6.5)', 
     expect(remoteRef(c.remote, 'main')).toBeUndefined();
   });
 
+  it('reads the tag a push sends, not a replacement: an annotated tag whose message is a raw record, replaced by a commit, is refused', () => {
+    const c = hookClone();
+    expect(c.push('origin', 'main')).toBe('');
+    c.hookGit('tag', '-a', '-m', `release\n\n${JSON.stringify(captureExamples.message_trade)}`, 'v-hidden');
+    const tag = c.hookGit('rev-parse', 'v-hidden').trim();
+    // Replaced by a commit, the tag reads as that commit to every git command that honours replace refs, so a hook that
+    // honoured them would take it for a lightweight tag and never read its message.
+    c.hookGit('replace', '-f', tag, c.hookGit('rev-parse', 'HEAD').trim());
+    expect(c.hookGit('cat-file', '-t', tag).trim()).toBe('commit');
+    expect(c.push('origin', 'refs/tags/v-hidden')).toMatch(/\(tag message\): line 3 of the tag message holds a raw capture record[\s\S]*refusing the push of refs\/tags\/v-hidden;/);
+    expect(remoteRef(c.remote, 'refs/tags/v-hidden')).toBeUndefined();
+  });
+
+  it('installs executable by the documented command, also over an existing copy that is not, which git would skip', () => {
+    const c = hookClone();
+    c.hookGit('config', '--unset', 'core.hooksPath');
+    const hooks = c.hookGit('rev-parse', '--git-path', 'hooks').trim();
+    const installed = join(c.root, hooks, 'pre-push');
+    mkdirSync(dirname(installed), { recursive: true });
+    writeFileSync(installed, 'stale\n', { mode: 0o644 });
+    chmodSync(installed, 0o644);
+    const install = /^cp \.githooks\/pre-push "\$\(git rev-parse --git-path hooks\)\/pre-push" && chmod \+x "\$\(git rev-parse --git-path hooks\)\/pre-push"(?=   #)/m.exec(read('README.md'))![0];
+    for (const text of [read('.githooks/pre-push'), read('docs/M2_DATA_CONTRACT.md'), read('docs/M2_GROK_HANDOFF.md')]) expect(text).toContain(install);
+    execFileSync('sh', ['-c', install], { cwd: c.root, env: GIT_ENV });
+    expect(statSync(installed).mode & 0o111).not.toBe(0);
+    expect(readRepoFile('.git/hooks/pre-push', c.root)).toEqual(readRepoFile('.githooks/pre-push', c.root));
+    // What the owner checks before a capture includes that the copy is executable (contract section 6.5, handoff A12).
+    for (const text of [read('docs/M2_DATA_CONTRACT.md'), read('docs/M2_GROK_HANDOFF.md')]) expect(text).toContain('test -x "$(git rev-parse --git-path hooks)/pre-push"');
+  });
+
   it('refuses to push an annotated tag whose message is a raw capture record, and a git notes ref whose note is one', () => {
     const c = hookClone();
     expect(c.push('origin', 'main')).toBe('');
@@ -1076,6 +1310,13 @@ describe('A10 classifier', () => {
 
   it('accepts the shape of a recorded fixture whose rights block is permitted + sample_permitted (constructed; establishes no permission)', () => {
     expect(classifyJsonl(recordedFixture(publishable))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+  });
+
+  it('refuses as publishable a recorded fixture whose rights block lacks termsUrl, termsCheckedOn or checkedBy, or a permitted one without its note', () => {
+    for (const key of ['termsUrl', 'termsCheckedOn', 'checkedBy', 'note']) {
+      const verdict = classifyJsonl(recordedFixture((r) => { publishable(r); delete r[key]; }));
+      expect(verdict, key).toMatchObject({ ok: false });
+    }
   });
 
   it('refuses a raw capture record nested at any depth in a recorded fixture, and keeps other undeclared keys open', () => {

@@ -159,6 +159,18 @@ describe('capture-record.v1 schema', () => {
       expected: [{ instancePath: '/processingMs/max', keyword: 'minimum' }],
     },
     {
+      name: 'manifest_end listing a file with a negative index',
+      from: 'manifest_end',
+      mutate: (d) => (d.files[0].fileIndex = -1),
+      expected: [{ instancePath: '/files/0/fileIndex', keyword: 'minimum' }],
+    },
+    {
+      name: 'manifest_end listing a file with no records (file_end counts at least one)',
+      from: 'manifest_end',
+      mutate: (d) => (d.files[0].records = 0),
+      expected: [{ instancePath: '/files/0/records', keyword: 'minimum' }],
+    },
+    {
       name: 'a record without receive clocks',
       from: 'note',
       mutate: (d) => {
@@ -386,6 +398,20 @@ describe('fixture.v2 schema', () => {
       expected: [{ instancePath: '/provenance', keyword: 'required', params: { missingProperty: 'rights' } }],
     },
     {
+      name: 'a recorded header with a cut at a negative record',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => d.provenance.capture.cuts.push({ reason: 'checksum_mismatch', fileIndex: 0, record: -1, detail: 'constructed' }),
+      expected: [{ instancePath: '/provenance/capture/cuts/0/record', keyword: 'minimum' }],
+    },
+    {
+      name: 'a recorded header with a cut without its detail',
+      from: 'header_recorded_qty8',
+      target: fixtureHeader,
+      mutate: (d) => d.provenance.capture.cuts.push({ reason: 'checksum_mismatch', fileIndex: 0, record: 1 }),
+      expected: [{ instancePath: '/provenance/capture/cuts/0', keyword: 'required', params: { missingProperty: 'detail' } }],
+    },
+    {
       name: 'sample_permitted publication with redistribution unclear',
       from: 'header_recorded_qty8',
       target: fixtureHeader,
@@ -574,14 +600,14 @@ describe('fixture.v2 schema', () => {
       name: 'a cut reason outside the contract list',
       from: 'header_recorded_qty8',
       target: fixtureHeader,
-      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'venue_said_so', fileIndex: 0, record: 1 }]),
+      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'venue_said_so', fileIndex: 0, record: 1, detail: 'constructed' }]),
       expected: [{ instancePath: '/provenance/capture/cuts/0/reason', keyword: 'enum' }],
     },
     {
       name: 'a planned end listed as a cut (it ends a segment without being one)',
       from: 'header_recorded_qty8',
       target: fixtureHeader,
-      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'capture_end', fileIndex: 0, record: 1 }]),
+      mutate: (d) => (d.provenance.capture.cuts = [{ reason: 'capture_end', fileIndex: 0, record: 1, detail: 'constructed' }]),
       expected: [{ instancePath: '/provenance/capture/cuts/0/reason', keyword: 'enum' }],
     },
     {
@@ -669,23 +695,69 @@ describe('normalize-report.v1 schema (closed: the data boundary of the report, c
     expect(ok).toBe(true);
   });
 
-  // Every object node closed, every string node constrained: a structural check over the whole schema, so a node
-  // added later without its constraint fails here even before it gets a derived failure case.
-  it('closes every object and constrains every string of the schema', () => {
+  // Every declared node closed or constrained: a structural check over the whole schema, so a node added later without
+  // its constraint fails here even before it gets a derived failure case. It reads the schema as a schema, so a node
+  // that accepts any value (`true`, or an object that names no type, enum, const, $ref or oneOf), a keyword it does not
+  // read (patternProperties, propertyNames, anyOf, ...), a number that is not an integer with a minimum, an object not
+  // closed by additionalProperties false, an array without items and a $ref outside $defs are all open.
+  const KNOWN_KEYWORDS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'pattern', 'format', 'minimum', 'maximum', 'minItems', 'maxItems', 'maxProperties', 'oneOf', '$ref', '$defs', '$id', '$schema', 'title', 'description', 'if', 'then', 'else', 'not', 'contains']);
+  /** Where `schema` is open, one line each; empty when every declared node is closed or constrained. */
+  const openNodes = (schema: Json): string[] => {
     const open: string[] = [];
-    const walk = (node: unknown, at: string): void => {
-      if (Array.isArray(node)) return node.forEach((n, i) => walk(n, `${at}/${i}`));
-      if (typeof node !== 'object' || node === null) return;
-      const n = node as Json;
-      const types = ([] as unknown[]).concat(n.type ?? []);
-      if (types.includes('object') && n.additionalProperties !== false) open.push(`${at}: object without additionalProperties false`);
-      if (types.includes('string') && n.enum === undefined && n.const === undefined && n.pattern === undefined && n.format === undefined) open.push(`${at}: unconstrained string`);
-      // if/then/else, not and contains only narrow what the declared properties already allow (they are applied on top of
-      // them), so the shape definitions checked here are the declared ones.
-      for (const [k, v] of Object.entries(n)) if (!['enum', 'const', 'if', 'then', 'else', 'not', 'contains'].includes(k)) walk(v, `${at}/${k}`);
+    const node = (n: unknown, at: string): void => {
+      if (n === false) return;
+      if (n === true) return void open.push(`${at}: a schema that accepts any value`);
+      if (typeof n !== 'object' || n === null || Array.isArray(n)) return void open.push(`${at}: not a schema`);
+      const x = n as Json;
+      for (const k of Object.keys(x)) if (!KNOWN_KEYWORDS.has(k)) open.push(`${at}: keyword ${k}, which this check does not read`);
+      const types = ([] as unknown[]).concat(x.type ?? []);
+      if (types.length === 0 && x.enum === undefined && x.const === undefined && x.$ref === undefined && x.oneOf === undefined) open.push(`${at}: a node that names no type, enum, const, $ref or oneOf`);
+      if (x.$ref !== undefined && !(typeof x.$ref === 'string' && /^#\/\$defs\/[A-Za-z0-9]+$/.test(x.$ref) && schema.$defs?.[x.$ref.slice(8)] !== undefined)) open.push(`${at}: a $ref outside this schema's $defs`);
+      for (const t of types) if (!['object', 'array', 'string', 'integer', 'null'].includes(t as string)) open.push(`${at}: type ${String(t)}`);
+      if (types.includes('integer') && typeof x.minimum !== 'number') open.push(`${at}: an integer without a minimum`);
+      if (types.includes('string') && x.enum === undefined && x.const === undefined && x.pattern === undefined && x.format === undefined) open.push(`${at}: unconstrained string`);
+      if (types.includes('object') && x.additionalProperties !== false) open.push(`${at}: object without additionalProperties false`);
+      if (types.includes('array') && x.items === undefined) open.push(`${at}: array without items`);
+      if (x.properties !== undefined) for (const [k, v] of Object.entries(x.properties as Json)) node(v, `${at}/properties/${k}`);
+      if (x.items !== undefined) node(x.items, `${at}/items`);
+      if (x.additionalProperties !== undefined && x.additionalProperties !== false) node(x.additionalProperties, `${at}/additionalProperties`);
+      if (x.oneOf !== undefined) (x.oneOf as unknown[]).forEach((v, i) => node(v, `${at}/oneOf/${i}`));
+      if (x.$defs !== undefined) for (const [k, v] of Object.entries(x.$defs as Json)) node(v, `${at}/$defs/${k}`);
+      // if/then/else, not and contains only narrow what the declared properties already allow (they are applied on top
+      // of them, and additionalProperties false reads only the declared properties), so the shapes checked are the
+      // declared ones.
     };
-    walk(readJson(REPORT_SCHEMA), '');
-    expect(open).toEqual([]);
+    node(schema, '');
+    return open;
+  };
+
+  it('closes every object and constrains every value node of the schema', () => {
+    expect(openNodes(readJson(REPORT_SCHEMA) as Json)).toEqual([]);
+  });
+
+  it('finds each way a schema change could open the report: a free-text field of any schema shape, a pattern key, a number', () => {
+    const changed = (edit: (s: Json) => void): string[] => {
+      const s = structuredClone(readJson(REPORT_SCHEMA)) as Json;
+      edit(s);
+      return openNodes(s);
+    };
+    const cases: [string, (s: Json) => void, RegExp][] = [
+      ['a cut note as {}', (s) => (s.$defs.cut.properties.note = {}), /cut\/properties\/note: a node that names no type/],
+      ['a cut note as true', (s) => (s.$defs.cut.properties.note = true), /cut\/properties\/note: a schema that accepts any value/],
+      ['a cut note with only a description', (s) => (s.$defs.cut.properties.note = { description: 'free text' }), /cut\/properties\/note: a node that names no type/],
+      ['a cut note as an unconstrained string', (s) => (s.$defs.cut.properties.note = { type: 'string' }), /cut\/properties\/note: unconstrained string/],
+      ['a cut note as a number', (s) => (s.$defs.cut.properties.note = { type: 'number' }), /cut\/properties\/note: type number/],
+      ['a cut note as an integer without a minimum', (s) => (s.$defs.cut.properties.note = { type: 'integer' }), /cut\/properties\/note: an integer without a minimum/],
+      ['a cut note as a list of anything', (s) => (s.$defs.cut.properties.note = { type: 'array' }), /cut\/properties\/note: array without items/],
+      ['a cut note as a list of true', (s) => (s.$defs.cut.properties.note = { type: 'array', items: true }), /note\/items: a schema that accepts any value/],
+      ['a cut note as an open object', (s) => (s.$defs.cut.properties.note = { type: 'object' }), /note: object without additionalProperties false/],
+      ['a cut note by anyOf', (s) => (s.$defs.cut.properties.note = { anyOf: [{ type: 'string' }] }), /note: keyword anyOf/],
+      ['a cut note by an external $ref', (s) => (s.$defs.cut.properties.note = { $ref: 'https://example.com/free.json' }), /note: a \$ref outside/],
+      ['pattern keys on cuts', (s) => (s.$defs.cut.patternProperties = { '^x': { type: 'string' } }), /cut: keyword patternProperties/],
+      ['property names on counts', (s) => (s.properties.counts.propertyNames = { pattern: '.*' }), /counts: keyword propertyNames/],
+      ['additional properties as a schema', (s) => (s.$defs.cut.additionalProperties = { type: 'string', pattern: '.*' }), /cut: object without additionalProperties false/],
+    ];
+    for (const [name, edit, found] of cases) expect(changed(edit).join('\n'), name).toMatch(found);
   });
 
   const withSupersedes = (d: Json): void => {
@@ -771,6 +843,311 @@ describe('the contract text and the schemas agree (docs/M2_DATA_CONTRACT.md)', (
     if (!branch) throw new Error(`no branch for ${type}`);
     return branch.then.properties.detail as Json;
   };
+
+  // Section 4.1's table is the oracle for the fields each record type must carry: its "additional fields" column names
+  // them, and a parenthesis that opens with ticked names right after a field names that field's own members. Each named
+  // field, deleted from its type's example, must make the record invalid, so a `required` entry dropped from the schema
+  // fails here (review of 66c19e2, M7).
+  it('refuses a record of every type without any field section 4.1 names for it, or without one of that field\'s named members', () => {
+    const start = contract.indexOf('| `type` | additional fields | meaning |');
+    const table = contract.slice(start).split('\n');
+    const rows = table.slice(2, table.indexOf('', 1));
+    const named = new Map<string, string[][]>();
+    for (const row of rows) {
+      const [types, fields] = row.slice(2).split(' | ') as [string, string];
+      const paths: string[][] = [];
+      let depth = 0;
+      for (let i = 0; i < fields.length; i++) {
+        const c = fields[i]!;
+        if (c === '(') depth++;
+        else if (c === ')') depth--;
+        else if (c === '`' && depth === 0) {
+          const end = fields.indexOf('`', i + 1);
+          const field = fields.slice(i + 1, end).split(':')[0]!.trim();
+          paths.push([field]);
+          const group = /^ \((?:required: )?(`[A-Za-z0-9_]+`(?:, `[A-Za-z0-9_]+`)*)/.exec(fields.slice(end + 1));
+          if (group) for (const m of ticked(group[1]!)) paths.push([field, m]);
+          i = end;
+        }
+      }
+      for (const t of ticked(types)) named.set(t, paths);
+    }
+    expect(sorted(named.keys())).toEqual(sorted((captureSchema.properties.type.enum as string[])));
+    expect(named.get('manifest_start')).toContainEqual(['instrumentSpec', 'payload']);
+    expect(named.get('manifest_end')).toContainEqual(['processingMs', 'p99']);
+    let checked = 0;
+    for (const [name, example] of Object.entries(captureExamples)) {
+      for (const path of named.get(example.type as string)!) {
+        const d = structuredClone(example) as Json;
+        const parent = path.length === 1 ? d : Array.isArray(d[path[0]!]) ? d[path[0]!][0] : d[path[0]!];
+        expect(parent, `${name}: ${path.join('.')} is in the example`).toHaveProperty([path[path.length - 1]!]);
+        delete parent[path[path.length - 1]!];
+        expect(capture(d), `${name} without ${path.join('.')}`).toBe(false);
+        checked++;
+      }
+    }
+    // And the fields section 4 gives every record: "Every record has `type`, `recvWallMs` (integer), `recvMonoNs` ...".
+    const common = /Every record has ((?:`[A-Za-z]+`[^,.`]*, )+`[A-Za-z]+`)/.exec(contract)![1]!;
+    expect(ticked(common)).toEqual(['type', 'recvWallMs', 'recvMonoNs']);
+    for (const [name, example] of Object.entries(captureExamples)) {
+      for (const field of ticked(common)) {
+        const d = structuredClone(example) as Json;
+        delete d[field];
+        expect(capture(d), `${name} without ${field}`).toBe(false);
+        checked++;
+      }
+    }
+    // 13 record types with 60 named fields and members over the 18 examples, and 3 common fields each.
+    expect(checked).toBe(60 + 18 * 3);
+  });
+
+  // Section 6.3's rights block is the oracle for the rights metadata: every key it shows is required except `note`, which
+  // is required only when redistribution is permitted (review of 66c19e2, M7: dropping termsUrl, termsCheckedOn or
+  // checkedBy from the schema's required list failed no test).
+  it('refuses a recorded header whose rights block lacks any key section 6.3 shows, and a permitted one without its note', () => {
+    const block = /### 6\.3 `rights` block and the publication gate\n\n```json\n(\{.*\})\n```/.exec(contract)![1]!;
+    const keys = [...block.matchAll(/"([A-Za-z]+)": /g)].map((m) => m[1]!);
+    expect(keys).toEqual(['termsUrl', 'termsCheckedOn', 'checkedBy', 'redistribution', 'publication', 'note']);
+    expect(fixtureHeader(fixtureExamples.header_recorded_qty8)).toBe(true);
+    for (const key of keys.filter((k) => k !== 'note')) {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+      delete h.provenance.rights[key];
+      expect(fixtureHeader(h), `rights without ${key}`).toBe(false);
+      expect(reasons(fixtureHeader.errors)).toContainEqual({ instancePath: '/provenance/rights', keyword: 'required', params: { missingProperty: key } });
+    }
+    const permitted = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+    Object.assign(permitted.provenance.rights, { redistribution: 'permitted', publication: 'sample_permitted' });
+    expect(fixtureHeader(permitted)).toBe(true);
+    delete permitted.provenance.rights.note;
+    expect(fixtureHeader(permitted)).toBe(false);
+    const hashOnly = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+    delete hashOnly.provenance.rights.note;
+    expect(fixtureHeader(hashOnly), 'note is optional when redistribution is not permitted').toBe(true);
+  });
+
+  // Section 6.1's header table is the oracle for the recorded header: each field it requires in version 2, always or
+  // when `synthetic: false`, and each field its `provenance.capture` row lists with the members it names for it, deleted
+  // from the recorded example, must make the header invalid (review of 66c19e2, M7).
+  it('refuses a recorded header without any field section 6.1 requires, or without a provenance.capture field or member it names', () => {
+    const start = contract.indexOf('| field | required when | content |');
+    const table = contract.slice(start).split('\n');
+    const rows = table.slice(2, table.indexOf('', 1)).map((r) => r.slice(2).split(' | ') as [string, string, string]);
+    const members = (inner: string): string[] => {
+      const out: string[] = [];
+      let depth = 0;
+      let part = '';
+      for (const c of `${inner},`) {
+        if (c === '{' || c === '[') depth++;
+        if (c === '}' || c === ']') depth--;
+        if (c === ',' && depth === 0) {
+          out.push(part.split(':')[0]!.trim());
+          part = '';
+        } else part += c;
+      }
+      return out;
+    };
+    const header: string[][] = [];
+    for (const [fields, when] of rows) if (['v2', 'always', '`synthetic: false`'].includes(when)) for (const f of ticked(fields)) header.push(f.split('.'));
+    expect(header.map((p) => p.join('.'))).toEqual(['depth', 'venueSymbol', 'priceScale', 'qtyScale', 'provenance.timeBasis.obsTime', 'provenance.timeBasis.marketTime', 'provenance.instrumentSpec', 'provenance.capture', 'provenance.rights', 'startTime', 'endTime']);
+    const content = rows.find(([f]) => f === '`provenance.capture`')![2];
+    const capture = new Map<string, string[]>();
+    let pending: string[] = [];
+    for (let i = 0, depth = 0; i < content.length; i++) {
+      const c = content[i]!;
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === '`' && depth === 0) {
+        const end = content.indexOf('`', i + 1);
+        const token = content.slice(i + 1, end);
+        const name = token.split(':')[0]!.trim();
+        const shape = /^[A-Za-z]+: \[?\{(.*)\}\]?$/.exec(token);
+        capture.set(name, shape ? members(shape[1]!) : []);
+        // `capturer` / `normalizer` (...): a group after names joined by " / " belongs to each of them.
+        const group = /^ \((?:list of `\{([^}]*)\}`|(`[A-Za-z]+`(?:, `[A-Za-z]+`)+))/.exec(content.slice(end + 1));
+        if (group) for (const n of [...pending, name]) capture.set(n, group[1] !== undefined ? members(group[1]) : ticked(group[2]!));
+        pending = content.slice(end + 1).startsWith(' / ') ? [...pending, name] : [];
+        i = end;
+      }
+    }
+    const fixtureSchema = readJson(FIXTURE_SCHEMA) as Json;
+    expect(sorted(capture.keys())).toEqual(sorted(fixtureSchema.$defs.capture.required as string[]));
+    expect(capture.get('normalizer')).toEqual(['name', 'version', 'commit']);
+    expect(capture.get('capturer')).toEqual(['name', 'version', 'commit']);
+    expect(capture.get('cuts')).toEqual(['reason', 'fileIndex', 'record', 'detail']);
+    const example = fixtureExamples.header_recorded_qty8 as Json;
+    // One item for each list the example leaves empty, so its members can be deleted; each is valid as written.
+    const items: Record<string, Json> = { cuts: { reason: 'checksum_mismatch', fileIndex: 0, record: 1, detail: 'constructed' }, venueStatus: { record: { fileIndex: 0, record: 1, element: 0 }, source: 'status', value: 'maintenance' } };
+    const withItems = (): Json => {
+      const h = structuredClone(example);
+      for (const [k, v] of Object.entries(items)) if (h.provenance.capture[k].length === 0) h.provenance.capture[k].push(structuredClone(v));
+      return h;
+    };
+    expect(fixtureHeader(withItems()), JSON.stringify(fixtureHeader.errors?.[0])).toBe(true);
+    let checked = 0;
+    for (const path of header) {
+      const h = structuredClone(example);
+      const parent = path.slice(0, -1).reduce((o, k) => o[k], h);
+      expect(parent, path.join('.')).toHaveProperty([path[path.length - 1]!]);
+      delete parent[path[path.length - 1]!];
+      expect(fixtureHeader(h), `header without ${path.join('.')}`).toBe(false);
+      checked++;
+    }
+    for (const [field, names] of capture) {
+      const h = withItems();
+      delete h.provenance.capture[field];
+      expect(fixtureHeader(h), `capture without ${field}`).toBe(false);
+      checked++;
+      for (const m of names) {
+        const g = withItems();
+        const v = g.provenance.capture[field];
+        const parent = Array.isArray(v) ? v[0] : v;
+        expect(parent, `${field}.${m}`).toHaveProperty([m]);
+        delete parent[m];
+        expect(fixtureHeader(g), `capture.${field} without ${m}`).toBe(false);
+        checked++;
+      }
+    }
+    // 11 header fields, 20 capture fields and 28 members they name.
+    expect(checked).toBe(59);
+  });
+
+  // Section 8.4's mapping table names the fields of `provenance.instrumentSpec`; section 4.2 names the clock sources; and
+  // section 6.3's block names the rights values. Each is the oracle for its constraint (review of 66c19e2, M7).
+  it('refuses a recorded header whose instrumentSpec lacks any field section 8.4 maps, and accepts only the clock sources and rights values sections 4.2 and 6.3 name', () => {
+    const start = contract.indexOf('| `instrumentSpec` | source field | example');
+    const table = contract.slice(start).split('\n');
+    const fields = table.slice(2, table.indexOf('', 1)).flatMap((r) => ticked(r.slice(2).split(' | ')[0]!));
+    const fixtureSchema = readJson(FIXTURE_SCHEMA) as Json;
+    expect(sorted(fields)).toEqual(sorted(fixtureSchema.$defs.instrumentSpec.required as string[]));
+    for (const f of fields) {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+      expect(h.provenance.instrumentSpec, f).toHaveProperty([f]);
+      delete h.provenance.instrumentSpec[f];
+      expect(fixtureHeader(h), `instrumentSpec without ${f}`).toBe(false);
+    }
+    // Section 4.2: "`source` is `chrony`, `ntpd`, `ptp`, `platform` (...) or `unknown`", in the raw manifest and the header.
+    const sources = ticked(/`source` is ((?:`[a-z]+`[^`]*?)+) or `unknown`/.exec(contract)![0]!).slice(1);
+    expect(sources).toEqual(['chrony', 'ntpd', 'ptp', 'platform', 'unknown']);
+    for (const value of [...sources, 'gps']) {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+      h.provenance.capture.clockReports.start.source = value;
+      const m = structuredClone(captureExamples.manifest_start) as Json;
+      m.clock.source = value;
+      expect(fixtureHeader(h), `header clock source ${value}`).toBe(value !== 'gps');
+      expect(capture(m), `manifest clock source ${value}`).toBe(value !== 'gps');
+    }
+    // Section 6.3: `"redistribution": "permitted" | "prohibited" | "unclear", "publication": "hash_only" | "sample_permitted"`.
+    const rights = /### 6\.3 `rights` block and the publication gate\n\n```json\n(\{.*\})\n```/.exec(contract)![1]!;
+    for (const key of ['redistribution', 'publication']) {
+      const values = [...new RegExp(`"${key}": ((?:"[a-z_]+"(?: \\| )?)+)`).exec(rights)![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+      expect(values.length, key).toBeGreaterThan(1);
+      for (const value of [...values, 'public']) {
+        const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+        Object.assign(h.provenance.rights, { redistribution: 'permitted', publication: 'hash_only', [key]: value });
+        expect(fixtureHeader(h), `${key} ${value}`).toBe(value !== 'public');
+      }
+    }
+  });
+
+  it('refuses the value formats the contract fixes: an upper-case hash, a negative time, a monotonic clock that is not digits, an exponent lexeme', () => {
+    const cases: [string, (h: Json) => void][] = [
+      ['a raw file hash in upper case (lower-case hex, section 5.10)', (h) => (h.provenance.capture.rawFiles[0].sha256 = 'B'.repeat(64))],
+      ['a negative start time (obsTime is milliseconds since the epoch)', (h) => (h.startTime = -1)],
+      ['a negative raw record reference', (h) => (h.provenance.capture.endRawRecord.record = -1)],
+      ['an increment written with an exponent (section 8.4 converts it exactly)', (h) => (h.provenance.instrumentSpec.lotSize = '1e-08')],
+      ['a negative segment index', (h) => (h.provenance.capture.segmentIndex = -1)],
+      ['a negative trade id jump count', (h) => (h.provenance.capture.tradeIdJumps = -1)],
+    ];
+    for (const [name, mutate] of cases) {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+      mutate(h);
+      expect(fixtureHeader(h), name).toBe(false);
+    }
+    const r = structuredClone(captureExamples.message_trade) as Json;
+    r.recvMonoNs = '5e12';
+    expect(capture(r), 'a monotonic clock that is not a string of digits (section 4.1)').toBe(false);
+  });
+
+  // docs/EVENT_SCHEMA.md is the oracle for the fields every fixture header and event carries (section 6.1 keeps them,
+  // "unchanged"): the header block's keys, except those it gives synthetic fixtures only, and the fields it names for
+  // every event, a book event and a trade event (review of 66c19e2, M7).
+  it('refuses a recorded header or an event without any field docs/EVENT_SCHEMA.md gives it', () => {
+    const events = readFileSync(new URL('docs/EVENT_SCHEMA.md', repoRoot), 'utf8');
+    const block = JSON.parse(/## Header \(first line\)\n\n```json\n([\s\S]*?)\n```/.exec(events)![1]!) as Json;
+    const syntheticOnly = ['syntheticLabel', 'generator', 'generatorVersion', 'seed'];
+    expect(events).toMatch(/`synthetic: true` requires `syntheticLabel`/);
+    const headerPaths = [
+      ...Object.keys(block).filter((k) => !syntheticOnly.includes(k)).map((k) => [k]),
+      ...Object.keys(block.provenance).filter((k) => !syntheticOnly.includes(k)).map((k) => ['provenance', k]),
+      ...Object.keys(block.provenance.timeBasis).map((k) => ['provenance', 'timeBasis', k]),
+    ];
+    expect(headerPaths.map((p) => p.join('.'))).toEqual(['type', 'schemaVersion', 'symbol', 'venue', 'priceScale', 'qtyScale', 'tickSize', 'lotSize', 'startTime', 'endTime', 'eventCount', 'synthetic', 'provenance', 'provenance.source', 'provenance.description', 'provenance.timeBasis', 'provenance.timeBasis.obsTime', 'provenance.timeBasis.marketTime']);
+    for (const path of headerPaths) {
+      const h = structuredClone(fixtureExamples.header_recorded_qty8) as Json;
+      const parent = path.slice(0, -1).reduce((o, k) => o[k], h);
+      delete parent[path[path.length - 1]!];
+      expect(fixtureHeader(h), `header without ${path.join('.')}`).toBe(false);
+    }
+    const common = ticked(/Common fields: (.*?), optional `blockNumber`/.exec(events)![1]!).map((t) => t.split(' ')[0]!);
+    expect(common).toEqual(['eventId', 'seq', 'obsTime', 'marketTime', 'symbol', 'venue']);
+    const book = ticked(/\*\*Book snapshot\*\* \(`type: "book"`\): (`bids` and `asks`)/.exec(events)![1]!);
+    const trade = ticked(/\*\*Trade\*\* \(`type: "trade"`\): (`tradeId`, `price`, `size`, `aggressor`)/.exec(events)![1]!);
+    for (const [example, validate, fields] of [[fixtureExamples.event_book, fixtureBook, [...common, 'type', ...book]], [fixtureExamples.event_trade, fixtureTrade, [...common, 'type', ...trade]]] as const) {
+      expect(validate(example)).toBe(true);
+      for (const f of fields) {
+        const e = structuredClone(example) as Json;
+        expect(e, f).toHaveProperty([f]);
+        delete e[f];
+        expect(validate(e), `${String((example as Json).type)} event without ${f}`).toBe(false);
+      }
+    }
+  });
+
+  // The documented examples are the oracle for the shapes the schemas require: deleting any one key from any object of
+  // any example makes it invalid, except the keys listed here, each optional by the contract for the reason given. A
+  // `required` entry dropped from a schema therefore fails here for every key an example carries (review of 66c19e2, M7).
+  it('refuses every example with any one key deleted, except the keys the contract makes optional', () => {
+    const optional: Record<string, [string[], string][]> = {
+      capture: [
+        [['clock.offsetMs', 'clock.report', 'clock.stratum'], 'section 4.2: absent when no report could be taken'],
+        [['counts.file_end', 'counts.file_start', 'counts.manifest_start', 'counts.message', 'counts.ping', 'counts.probe', 'counts.subscribe', 'counts.ws_close', 'counts.ws_open'], 'section 4.1: counts by record type, a type with no record has no key'],
+      ],
+      fixture: [
+        [['provenance.capture.clockReports.end.offsetMs', 'provenance.capture.clockReports.end.stratum', 'provenance.capture.clockReports.start.offsetMs', 'provenance.capture.clockReports.start.stratum'], 'section 4.2 blocks, as above'],
+        [['provenance.capture.dropped.depthBeforeSnapshot', 'provenance.capture.dropped.depthWhileUnsynced', 'provenance.capture.dropped.exponentLexemeInBook', 'provenance.capture.dropped.tradeSnapshotHistory'], 'section 6.1: dropped counts by key'],
+        [['provenance.generator', 'provenance.generatorVersion', 'provenance.seed'], 'EVENT_SCHEMA.md: the synthetic generator only'],
+        [['provenance.rights.note'], 'section 6.3: required only when redistribution is permitted'],
+        [['rawRef', 'recvMonoNs', 'venueSeq'], 'section 6.2: optional in the wire format'],
+      ],
+      report: [[['supersedes'], 'section 5.10: only when the run is given --supersedes']],
+    };
+    const cases: [string, Record<string, Json>, (name: string) => ValidateFunction][] = [
+      ['capture', captureExamples, () => capture],
+      ['fixture', fixtureExamples, (name) => (name.startsWith('header') ? fixtureHeader : name === 'event_book' ? fixtureBook : fixtureTrade)],
+      ['report', reportExamples, () => normalizeReport],
+    ];
+    for (const [kind, examples, validatorFor] of cases) {
+      const allowed = new Set(optional[kind]!.flatMap(([keys]) => keys));
+      const deletable = new Set<string>();
+      for (const [name, doc] of Object.entries(examples)) {
+        const validate = validatorFor(name);
+        expect(validate(doc), name).toBe(true);
+        const walk = (node: unknown, path: (string | number)[]): void => {
+          if (Array.isArray(node)) return node.forEach((x, i) => walk(x, [...path, i]));
+          if (typeof node !== 'object' || node === null) return;
+          for (const k of Object.keys(node)) {
+            const d = structuredClone(doc) as Json;
+            delete (path.reduce((o: any, p) => o[p], d) as Json)[k];
+            const at = [...path.map((p) => (typeof p === 'number' ? '[]' : p)), k].join('.');
+            if (validate(d)) deletable.add(at);
+            walk((node as Json)[k], [...path, k]);
+          }
+        };
+        walk(doc, []);
+      }
+      expect(sorted(deletable), kind).toEqual(sorted(allowed));
+    }
+  });
 
   // Every (record type, detail) pair of the section 8.1 lifecycle table, read from its "records written" column.
   const lifecycleTable = (): Map<string, Set<string>> => {

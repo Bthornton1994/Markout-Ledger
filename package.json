@@ -14,6 +14,8 @@
     "test:watch": "vitest",
     "test:schemas": "vitest run tests/schemas.test.ts",
     "test:history": "tsx tests/a10-history-cli.ts",
+    "proof:mutations": "node tests/mutation-proof.mjs",
+    "proof:schema-mutations": "node tests/schema-mutation-proof.mjs",
     "replay": "tsx src/cli/main.ts replay",
     "fixtures": "tsx src/cli/main.ts generate-fixtures",
     "demo": "tsx src/cli/main.ts replay --scenario baseline --out out && tsx src/cli/main.ts replay --scenario riskgate --out out",

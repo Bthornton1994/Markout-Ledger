@@ -1,6 +1,8 @@
 // Reference check of the structural capture rules (docs/M2_DATA_CONTRACT.md sections 5.3, 5.6, 5.8, 5.9 R5, R9 and R10,
 // and 8.1): socket spans and settlements, the subscription gate with subscription identity and instrument consistency,
-// the segment windows these rules leave, the items a segment may never carry, and the clock samples a segment owns.
+// the manifest's REST AssetPairs specification and its cross-checks (section 8.4), the segment windows these rules
+// leave, the items a segment may never carry, and the clock samples a segment owns. Of R5 it does not decide section
+// 5.5's clause for decimals beyond the scales of the engine that runs the normalizer (section 5.11).
 //
 // It is an executable specification for pull request PR-1, not a normalizer: it reconstructs no book, verifies no
 // checksum and emits no event. It reads raw capture records (schemas/capture-record.v1.schema.json) that are already
@@ -24,6 +26,43 @@ export interface SelectedInstrument {
   /** Decimal lexemes as the venue sends them; compared by value, never through a float. */
   priceIncrement: string;
   qtyIncrement: string;
+  /**
+   * The `altname` the manifest's REST `AssetPairs` payload must hold the pair under (contract section 8.4); when absent,
+   * the adapter's fixed mapping (`XBTUSD` for `BTC/USD`, REST_NAMES).
+   */
+  restName?: string;
+}
+
+/** The adapter's fixed mapping from a WebSocket symbol to its REST name (contract section 8.4). */
+export const REST_NAMES: Readonly<Record<string, string>> = { 'BTC/USD': 'XBTUSD' };
+interface RestSpec {
+  pair_decimals: number;
+  lot_decimals: number;
+  tick_size: string;
+}
+/**
+ * The pair's entry in the manifest's REST `AssetPairs` payload (contract sections 5.10 step (1) and 8.4), or why the
+ * manifest gives no usable specification: the payload must be an error-free response whose `result` holds exactly one
+ * entry whose `altname` is the pair's REST name, with integer `pair_decimals` and `lot_decimals` and a decimal
+ * `tick_size`, and whose `status`, when present, is `online` (an absent REST status is no disagreement).
+ */
+function restSpec(manifest: RawRecord, restName: string | undefined): RestSpec | string {
+  if (restName === undefined) return 'no REST name is known for the selected pair, so the manifest gives no REST specification for it';
+  const spec = manifest.instrumentSpec as { payload?: unknown } | undefined;
+  const payload = typeof spec?.payload === 'string' ? parsePayload(spec.payload) : undefined;
+  const result = payload?.result;
+  if (payload === undefined || !Array.isArray(payload.error) || payload.error.length > 0 || typeof result !== 'object' || result === null || Array.isArray(result)) {
+    return "the manifest's REST AssetPairs payload is missing, malformed or reports an error, so it gives no specification";
+  }
+  const entries = Object.values(result as Record<string, any>).filter((e) => typeof e === 'object' && e !== null && e.altname === restName);
+  if (entries.length === 0) return `the manifest's REST AssetPairs payload has no entry for ${restName}`;
+  if (entries.length > 1) return `the manifest's REST AssetPairs payload lists ${restName} more than once`;
+  const e = entries[0]!;
+  if (!Number.isInteger(e.pair_decimals) || !Number.isInteger(e.lot_decimals) || typeof e.tick_size !== 'string' || !/^\d+(\.\d+)?$/.test(e.tick_size)) {
+    return `the manifest's REST AssetPairs entry for ${restName} lacks integer pair_decimals and lot_decimals or a decimal tick_size`;
+  }
+  if (e.status !== undefined && e.status !== 'online') return `the manifest's REST AssetPairs entry for ${restName} gives status ${String(e.status)}`;
+  return { pair_decimals: e.pair_decimals, lot_decimals: e.lot_decimals, tick_size: e.tick_size };
 }
 
 export interface SocketReport {
@@ -203,6 +242,10 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
   // whatever else it holds. A run whose manifest_start is missing writes no normalize report at all (section 5.10).
   if (records[0]?.type !== 'manifest_start') return refuse('R1', 0, 'the stream does not begin with manifest_start');
   if (records[records.length - 1]!.type !== 'manifest_end') return refuse('R1', records.length - 1, 'the stream does not end with manifest_end');
+  // Then the manifest's REST specification (R5 for a specification missing from the manifest, section 5.10 step (1)):
+  // its decimals and tick size are compared with the capture's first instrument snapshot below (step (2)).
+  const rest = restSpec(records[0]!, instrument.restName ?? REST_NAMES[S]);
+  if (typeof rest === 'string') return refuse('R5', 0, rest);
 
   for (const [i, r] of records.entries()) {
     if (i === 0) continue;
@@ -224,7 +267,9 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
       // the manifest_end record, as section 5.10 says; the checks after the loop cannot be reached while R1 holds.
       if (sock) return refuse('R10', i, 'the last socket has no terminal record');
       if (prev !== 'file_end') return refuse('R10', i, 'a manifest_end that does not follow the last file_end');
-      if (i !== records.length - 1) return refuse('R10', i, 'records follow manifest_end');
+      // Records after it mean the file_end before it was not the last file's, so it is a record after a file's file_end
+      // other than the next file's file_start: R1b (section 5.9), which section 5.10 orders before R10.
+      if (i !== records.length - 1) return refuse('R1b', i, "a manifest_end after a file_end that is not the last file's, outside every file hash");
       break;
     }
     if (ended) {
@@ -286,6 +331,14 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
         // An instrument frame lists the selected pair at most once: two entries could disagree (R5, section 8.1).
         if (entries.length > 1) return refuse('R5', i, `an instrument ${String(p.type)} lists ${S} more than once`);
         const pair = entries[0];
+        if (pair && p.type === 'snapshot' && !specSeen) {
+          // The capture's first instrument snapshot is the capture-start specification: it must agree with the manifest's
+          // REST specification (R5, sections 5.10 step (2) and 8.4). Whether its decimals fit the engine's scales (section
+          // 5.5) depends on the engine that runs the normalizer, so this reference does not decide it (section 5.11).
+          if (pair.price_precision !== rest.pair_decimals || pair.qty_precision !== rest.lot_decimals || !sameDecimal(pair.price_increment, rest.tick_size)) {
+            return refuse('R5', i, `the capture's first instrument snapshot and the manifest's REST specification disagree for ${S} (pair_decimals, lot_decimals or tick_size)`);
+          }
+        }
         if (pair) {
           const spec =
             pair.price_precision === instrument.pricePrecision && pair.qty_precision === instrument.qtyPrecision &&

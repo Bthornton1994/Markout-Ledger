@@ -88,7 +88,7 @@
           "endedAtIso": { "type": "string", "format": "date-time" },
           "clock": { "$ref": "#/$defs/clock" },
           "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
-          "files": { "type": "array", "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer" } } } },
+          "files": { "type": "array", "items": { "type": "object", "required": ["fileIndex", "sha256", "records"], "properties": { "fileIndex": { "type": "integer", "minimum": 0 }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "type": "integer", "minimum": 1 } } } },
           "processingMs": { "type": "object", "required": ["p50", "p99", "max"], "properties": { "p50": { "type": "number", "minimum": 0 }, "p99": { "type": "number", "minimum": 0 }, "max": { "type": "number", "minimum": 0 } }, "description": "required: frame-handler duration percentiles in milliseconds over every received frame (contract section 2), so the delay the live checks can add to the next receive stamp is auditable; all three are 0 when no frame was received" }
         }
       }

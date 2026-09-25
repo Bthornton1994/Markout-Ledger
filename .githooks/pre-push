@@ -2,7 +2,9 @@
 # A10 pre-push check (docs/M2_DATA_CONTRACT.md section 6.5). Opt in once per clone, from the repository root, by copying
 # it into the clone's own hooks directory:
 #
-#   cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push"
+#   cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push" && chmod +x "$(git rev-parse --git-path hooks)/pre-push"
+#
+# (cp onto an existing copy keeps that copy's mode, and git skips a hook that is not executable.)
 #
 # A copy in .git/hooks stays active whatever commit is checked out, and refuses a push from a checkout that lacks the
 # scan (below). `git config core.hooksPath .githooks` also enables it, but that path is resolved against the working

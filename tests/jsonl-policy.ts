@@ -165,10 +165,13 @@ const LINE_BREAK = /\r\n|[\n\r]/;
  * U+2028 and U+2029 unescaped inside a string, so a line is also tried whole, before and apart from these parts. */
 const PART_BREAK = /[\v\f\u0085\u2028\u2029]/;
 /** White space, control characters (Unicode Cc: the record separator of a JSON text sequence ...), format characters
- * (Unicode Cf: zero-width space, word joiner, byte order mark ...) and marks (Unicode M: combining grapheme joiner,
- * variation selectors ...) at either end of a line or part. The trailing run may start only after a character outside
- * the class, so a long run of padding inside a line costs linear time, not quadratic. */
-const LINE_PADDING = /^[\s\p{Cc}\p{Cf}\p{M}]+|(?<![\s\p{Cc}\p{Cf}\p{M}])[\s\p{Cc}\p{Cf}\p{M}]+$/gu;
+ * (Unicode Cf: zero-width space, word joiner, byte order mark ...), marks (Unicode M: combining grapheme joiner,
+ * variation selectors ...) and every other character the schemas' non-blank rule counts as invisible (fixture.v2
+ * $defs/nonBlank: default-ignorable code points such as the Hangul fillers, and U+2800, U+303F, U+FFFC, U+13441, U+13442
+ * and U+1D159) at either end of a line or part. The trailing run may start only after a character outside the class, so
+ * a long run of padding inside a line costs linear time, not quadratic. */
+const PADDING = String.raw`\s\p{Cc}\p{Cf}\p{M}\p{Default_Ignorable_Code_Point}\u2800\u303F\uFFFC\u{13441}\u{13442}\u{1D159}`;
+const LINE_PADDING = new RegExp(`^[${PADDING}]+|(?<![${PADDING}])[${PADDING}]+$`, 'gu');
 
 /** A markdown block quote's markers (`> `, `> > `) and a git trailer's token (`Raw-Record: `: a letter or digit, then
  * letters, digits and hyphens, a colon and white space) at the start of a line. */
@@ -218,21 +221,51 @@ export function rawRecordLine(text: string): number | undefined {
   return undefined;
 }
 
-/** The first line of a Git LFS pointer file (the LFS specification's version URL, current and legacy), after any leading
- * white space (NEL included, which JavaScript's \s omits), which git-lfs trims before it decodes a pointer. */
-const LFS_POINTER = /^[\s\x85]*version https:\/\/(git-lfs|hawser)\.github\.com\/spec\/v1\r?\n/;
+/**
+ * The version URLs git-lfs accepts in a pointer: its `v1Aliases`, the public launch, pre-release and alpha forms
+ * (git-lfs lfs/pointer.go, read at commit 0043a64).
+ */
+const LFS_VERSIONS = new Set(['https://git-lfs.github.com/spec/v1', 'https://hawser.github.com/spec/v1', 'http://git-media.io/v/2']);
+/** The leading bytes git-lfs reads to decode a pointer (its `BlobSizeCutoff`), whatever the blob's size. */
+const LFS_POINTER_BYTES = 1024;
+/** A pointer extension key, which git-lfs accepts on any line before `version` (its `extRE`, a prefix match). */
+const LFS_EXT_KEY = /^ext-\d-\w+/i;
+/** White space git-lfs trims at both ends before it decodes (Go's unicode.IsSpace, NEL included), and the byte order mark. */
+const LFS_EDGE = /^[\s\x85\ufeff]+/u;
+
+/**
+ * Whether git-lfs could take `bytes` for a pointer, whatever else they hold. This follows git-lfs's own decoder
+ * (lfs/pointer.go DecodeFrom and decodeKVData at commit 0043a64) and refuses more than it accepts, never less: it reads
+ * the first 1024 bytes as git-lfs does, on the raw bytes rather than only on UTF-8 text (a pointer's extension line may
+ * hold bytes that are not UTF-8), trims white space at the start (a byte order mark too), skips empty and blank lines and
+ * `ext-N-name` lines, and takes the text for a pointer when the first other line is `version` followed by any of the
+ * version URLs git-lfs accepts, in any letter case and with any spacing. git-lfs also requires valid `oid` and `size`
+ * lines; this check does not, so a file that only begins like a pointer is refused as well (fail closed).
+ */
+export function isLfsPointer(bytes: Uint8Array): boolean {
+  const head = new TextDecoder('utf-8').decode(bytes.subarray(0, LFS_POINTER_BYTES)).replace(LFS_EDGE, '');
+  for (const raw of head.split('\n')) {
+    const line = raw.replace(/\r$/, '').trim();
+    if (line.length === 0) continue;
+    const [key = '', ...rest] = line.split(/[ \t]+/);
+    if (LFS_EXT_KEY.test(key)) continue;
+    return key.toLowerCase() === 'version' && LFS_VERSIONS.has(rest.join(' ').toLowerCase());
+  }
+  return false;
+}
 
 /** The verdict for a tracked file outside the three kinds: a Git LFS pointer is refused, since its content lives in the
  * LFS store outside git, where no layer reads it; other text is checked for raw capture record lines; bytes that are not
  * UTF-8 (binary or compressed files) are not inspected. */
 export function classifyOtherFile(bytes: Uint8Array): Verdict {
+  // Before the UTF-8 test: git-lfs decodes a pointer from its bytes, and one of its lines may hold bytes that are not UTF-8.
+  if (isLfsPointer(bytes)) return fail('a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it');
   let text: string;
   try {
     text = decodeStrict(bytes);
   } catch {
     return { ok: true, kind: 'not_inspected' };
   }
-  if (LFS_POINTER.test(text)) return fail('a Git LFS pointer, whose content lives in the LFS store outside git, where no layer reads it');
   const line = rawRecordLine(text);
   return line === undefined ? { ok: true, kind: 'other_text' } : fail(`line ${line} holds a raw capture record, in a file the fixture rules do not cover`);
 }
@@ -504,6 +537,64 @@ const SUBMODULE_ANYWHERE_REASON = 'a submodule entry, whose content lives in ano
 const NOT_UTF8_REASON = 'bytes that are not UTF-8';
 const MISSING_REASON = 'a tracked path that is missing from the working tree';
 const NOT_FILE_REASON = 'a path that is not a regular file where the rule allows only a regular file';
+const NOT_UTF8_NAME_REASON = 'a covered path whose name is not UTF-8, which the rule cannot read by name';
+const UNREADABLE_ENTRY_REASON = 'a tracked entry whose blob git cannot read, so the content check cannot run';
+const MISSING_OTHER_REASON = 'a path neither in the index nor present in the working tree';
+
+/**
+ * A path as git records it, as text without loss: UTF-8 names as they are; for any other name every byte from 0x80 up,
+ * and every backslash, written as \\xHH, and `utf8` false, so a name that is not UTF-8 is never read under another name
+ * and two such names never become one.
+ */
+export interface GitPath {
+  path: string;
+  utf8: boolean;
+}
+export function gitPathText(bytes: Uint8Array): GitPath {
+  try {
+    return { path: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), utf8: true };
+  } catch {
+    let path = '';
+    for (const b of bytes) path += b >= 0x80 || b === 0x5c ? `\\x${b.toString(16).padStart(2, '0')}` : String.fromCharCode(b);
+    return { path, utf8: false };
+  }
+}
+
+/** The records of a NUL-terminated git listing (`-z`), each split at its first tab into the header and the path. */
+function zRecords(listing: Buffer): { head: string; name: GitPath }[] {
+  const records: { head: string; name: GitPath }[] = [];
+  let start = 0;
+  while (start < listing.length) {
+    let end = listing.indexOf(0, start);
+    if (end < 0) end = listing.length;
+    const record = listing.subarray(start, end);
+    start = end + 1;
+    if (record.length === 0) continue;
+    const tab = record.indexOf(9);
+    if (tab < 0) throw new Error(`A10 cannot parse a git listing record: ${JSON.stringify(record.toString('latin1'))}`);
+    records.push({ head: record.subarray(0, tab).toString('latin1'), name: gitPathText(record.subarray(tab + 1)) });
+  }
+  return records;
+}
+
+/** One entry of the index (`git ls-files -s -z`): its mode, object id and path. */
+export interface IndexEntry extends GitPath {
+  mode: string;
+  oid: string;
+}
+/** The index of the git checkout at `root`, every entry; a git failure throws, so the test fails rather than guessing. */
+export function indexEntries(root: string = repoRootPath): IndexEntry[] {
+  let listing: Buffer;
+  try {
+    listing = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root, env: GIT_SCAN_ENV, maxBuffer: 1 << 30, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
+  }
+  return zRecords(listing).map(({ head, name }) => {
+    const [mode = '', oid = ''] = head.split(' ');
+    return { mode, oid, ...name };
+  });
+}
 
 /**
  * The environment of every git command the rule runs: replace refs (git replace) are ignored, so the scan reads the
@@ -588,13 +679,9 @@ const FALLBACK_SKIP = new Set(['.git', 'node_modules', 'out', 'dist']);
 export function trackedHygieneFiles(root: string = repoRootPath): string[] {
   const covered = (p: string): boolean => hygieneKind(p) !== undefined;
   if (existsSync(join(root, '.git'))) {
-    let listing: string;
-    try {
-      listing = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', env: GIT_SCAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (e) {
-      throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
-    }
-    return listing.split('\0').filter(covered).sort();
+    // Without loss (gitPathText): a covered name that is not UTF-8 is listed in its escaped form, which names no file,
+    // so classifyRepoPath refuses it rather than reading another file or none.
+    return [...new Set(indexEntries(root).map((e) => e.path))].filter(covered).sort();
   }
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -624,18 +711,7 @@ export function trackedHygieneFiles(root: string = repoRootPath): string[] {
 export function trackedOtherFiles(root: string = repoRootPath): string[] {
   const other = (p: string): boolean => hygieneKind(p) === undefined;
   if (existsSync(join(root, '.git'))) {
-    let listing: string;
-    try {
-      listing = execFileSync('git', ['ls-files', '-s', '-z'], { cwd: root, encoding: 'utf8', env: GIT_SCAN_ENV, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (e) {
-      throw new Error(`A10 cannot list the tracked files (git ls-files failed in a git checkout): ${(e as Error).message}`);
-    }
-    return listing
-      .split('\0')
-      .filter((e) => e.startsWith('100') || e.startsWith('120000 ') || e.startsWith('160000 '))
-      .map((e) => e.slice(e.indexOf('\t') + 1))
-      .filter(other)
-      .sort();
+    return trackedOtherEntries(root).map((e) => e.path);
   }
   const found: string[] = [];
   const walk = (dir: string): void => {
@@ -653,15 +729,58 @@ export function trackedOtherFiles(root: string = repoRootPath): string[] {
 }
 
 /**
- * The verdict for a tracked path outside the three kinds, read from `root`: a submodule entry is refused, a symbolic
- * link's target text and a regular file's bytes get the content check (classifyOtherFile).
+ * Every index entry of the git checkout at `root` outside the three kinds, whatever its mode, sorted by path: each is
+ * classified by classifyOtherEntry, which reads it or refuses it.
+ */
+export function trackedOtherEntries(root: string = repoRootPath): IndexEntry[] {
+  return indexEntries(root)
+    .filter((e) => hygieneKind(e.path) === undefined)
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * The verdict for one index entry outside the three kinds. Fail closed: the entry is read, or it is refused. A submodule
+ * entry is refused, since its content lives in another repository. A regular file's or a symbolic link's blob (the
+ * link's target text) is read from the index by its object id, so an entry is checked whether or not the working tree
+ * holds it (a skip-worktree or sparse entry, a file deleted without `git rm`, a name that is not UTF-8), and a blob git
+ * cannot read, or a mode the rule does not know, is refused. When the name is UTF-8 and the working tree holds a file or
+ * link there, its bytes are checked too, so an unstaged change is not missed. Bytes that are not UTF-8 are read and not
+ * content-checked (classifyOtherFile), as in the history scan.
+ */
+export function classifyOtherEntry(entry: IndexEntry, root: string = repoRootPath): Verdict {
+  if (entry.mode === '160000') return fail(SUBMODULE_ANYWHERE_REASON);
+  if (!/^(100644|100755|120000)$/.test(entry.mode)) return fail(`an index entry of mode ${entry.mode}, which the rule does not read`);
+  let blob: Buffer;
+  try {
+    blob = git(root, ['cat-file', 'blob', entry.oid]);
+  } catch {
+    return fail(UNREADABLE_ENTRY_REASON);
+  }
+  const verdict = classifyOtherFile(blob);
+  if (!verdict.ok || !entry.utf8) return verdict;
+  const stat = lstatSync(join(root, entry.path), { throwIfNoEntry: false });
+  if (stat?.isSymbolicLink()) return worse(verdict, classifyOtherFile(readlinkSync(join(root, entry.path), { encoding: 'buffer' })));
+  if (stat?.isFile()) return worse(verdict, classifyOtherFile(readFileSync(join(root, entry.path))));
+  return verdict;
+}
+
+/** The first failing verdict of two, else the first. */
+const worse = (a: Verdict, b: Verdict): Verdict => (a.ok ? (b.ok ? a : b) : a);
+
+/**
+ * The verdict for a path outside the three kinds, read from `root`. In a git checkout the path's index entries are
+ * classified by classifyOtherEntry; a path the index does not hold is read from the working tree, and refused when it is
+ * not there either. Where the root has no `.git` (an exported archive) the file tree is read: a directory there (how
+ * git archive writes a submodule entry at a path no kind covers cannot be told from a directory) and any other non-file
+ * is not inspected, and a missing path is refused.
  */
 export function classifyOtherPath(path: string, root: string = repoRootPath): Verdict {
-  const stat = lstatSync(join(root, path), { throwIfNoEntry: false });
-  // A submodule entry is checked out as a directory, or not at all; only then is git asked, so a file costs no git call.
-  if (stat === undefined || stat.isDirectory()) {
-    return existsSync(join(root, '.git')) && isGitlink(root, path) ? fail(SUBMODULE_ANYWHERE_REASON) : { ok: true, kind: 'not_inspected' };
+  if (existsSync(join(root, '.git'))) {
+    const entries = indexEntries(root).filter((e) => e.utf8 && e.path === path);
+    if (entries.length > 0) return entries.map((e) => classifyOtherEntry(e, root)).reduce(worse);
   }
+  const stat = lstatSync(join(root, path), { throwIfNoEntry: false });
+  if (stat === undefined) return fail(MISSING_OTHER_REASON);
   if (stat.isSymbolicLink()) return classifyOtherFile(readlinkSync(join(root, path), { encoding: 'buffer' }));
   if (!stat.isFile()) return { ok: true, kind: 'not_inspected' };
   return classifyOtherFile(readFileSync(join(root, path)));
@@ -755,12 +874,11 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
     // continuation lines start with a space (rawRecordLine trims them).
     const headerLine = rawRecordLine(blank < 0 ? object : object.slice(0, blank));
     if (headerLine !== undefined) violations.push({ commit, path: '(commit header)', reason: `line ${headerLine} of the commit header (a mergetag, for example) holds a raw capture record` });
-    const entries = git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]).toString('utf8').split('\0').filter((e) => e.length > 0);
-    for (const entry of entries) {
-      const tab = entry.indexOf('\t');
-      const [mode, type, sha] = entry.slice(0, tab).split(' ');
-      const path = entry.slice(tab + 1);
-      if (sha === undefined) continue;
+    // Paths without loss (gitPathText): a name that is not UTF-8 is shown escaped, never read as another name.
+    for (const { head, name } of zRecords(git(root, ['ls-tree', '-r', '-z', '--full-tree', commit]))) {
+      const [mode, type, sha] = head.split(' ');
+      const path = name.path;
+      if (sha === undefined) throw new Error(`A10 history cannot parse a tree entry of ${commit}: ${JSON.stringify(head)}`);
       if (hygieneKind(path) === undefined) {
         // Outside the three kinds: a submodule entry is refused anywhere, since its content lives in another repository;
         // a regular file's or a symbolic link's blob (the link's target text) gets the content check, once per blob.
@@ -776,9 +894,13 @@ export function historyViolations(root: string, revArgs: string[]): HistoryScan 
         if (!verdict.ok) violations.push({ commit, path, reason: verdict.reason });
         continue;
       }
-      const key = `${sha}\0${path}`;
+      const key = `${sha}\0${name.utf8 ? 'u' : 'b'}${path}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      if (!name.utf8) {
+        violations.push({ commit, path, reason: NOT_UTF8_NAME_REASON });
+        continue;
+      }
       if (hygieneKind(path) === 'capture_dir') {
         violations.push({ commit, path, reason: CAPTURE_DIR_REASON });
         continue;

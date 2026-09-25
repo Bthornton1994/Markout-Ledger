@@ -184,8 +184,9 @@ class Tape {
     const files: { fileIndex: number; sha256: string; records: number }[] = [];
     let lines: string[] = [];
     const counts: Record<string, number> = {};
-    for (const r of this.records) {
-      if (r.type === 'manifest_end') break;
+    // Every record but the last manifest_end, which no file hash covers; a manifest_end a vector wrote earlier is a line
+    // of the file that follows it.
+    for (const r of this.records.slice(0, -1)) {
       counts[r.type] = (counts[r.type] ?? 0) + 1;
       if (r.type === 'file_end') {
         const sha256 = createHash('sha256').update(lines.join('')).digest('hex');
@@ -366,6 +367,20 @@ describe('M1: a segment never spans a socket settlement and never covers a socke
     expect(records.filter((r) => r.type === 'file_end')).toHaveLength(0);
     expect(records[records.length - 1]).toMatchObject({ type: 'manifest_end', files: [{ fileIndex: 0, records: records.length - 1 }] });
     expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R10', reason: expect.stringMatching(/manifest_end that does not follow the last file_end/) });
+  });
+
+  it('refuses a manifest_end followed by more records as R1b at that manifest_end: the file_end before it was not the last file\'s', () => {
+    const t = new Tape();
+    t.subscribedSocket();
+    t.close('capture_end');
+    t.push('file_end', { fileIndex: 0, records: 0, sha256: '0'.repeat(64) });
+    const { type: _t, recvWallMs: _w, recvMonoNs: _m, ...me } = structuredClone(examples.manifest_end);
+    const at = t.push('manifest_end', me);
+    t.push('file_start', { fileIndex: 1, previousFileSha256: '0'.repeat(64) });
+    const records = t.end();
+    schemaValid(records);
+    expect(records.filter((r) => r.type === 'manifest_end')).toHaveLength(2);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R1b', at, reason: expect.stringMatching(/a manifest_end after a file_end that is not the last file's/) });
   });
 
   it('refuses a stream that does not begin with manifest_start or does not end with manifest_end (R1, before any record rule)', () => {
@@ -1207,6 +1222,222 @@ describe('M3: which clock samples a segment owns (section 5.6, R2b, protocol I6)
     const r = analyzeCapture(records, BTC);
     expect(ownedClockSamples(records, r.sockets[0]!, step, end)).toMatchObject({ epoch: step, rest: [], source: 'none' });
     expect(() => ownedClockSamples(records, r.sockets[0]!, a.update, end)).toThrow(/never spans a clock step/);
+  });
+});
+
+describe('settlements that end the capture, acknowledgements, request identity and probe ownership (R9, R10, section 5.6)', () => {
+  /** A capture that settles its one socket with `settle`, then runs `after`; the reference's verdict and the stream. */
+  const capture = (settle: (t: Tape) => void, after: (t: Tape) => void = () => {}) => {
+    const t = new Tape();
+    t.subscribedSocket();
+    settle(t);
+    const marks = { next: t.records.length };
+    after(t);
+    const records = t.end();
+    schemaValid(records);
+    return { report: analyzeCapture(records, BTC), marks };
+  };
+  const ends: [string, (t: Tape) => void][] = [
+    ['capture_end', (t) => void t.close('capture_end')],
+    ['operator_stop', (t) => void t.close('operator_stop')],
+    ['subscribe_rejected', (t) => { t.error('subscribe_rejected'); t.close('subscribe_rejected'); }],
+    ['resync_budget_exhausted', (t) => { t.error('resync_budget_exhausted'); t.close('budget_exhausted'); }],
+    ['reconnect_budget_exhausted', (t) => { t.close('liveness_timeout'); t.error('reconnect_budget_exhausted'); }],
+  ];
+
+  it('ends the capture at every end row of the lifecycle table: nothing but file_end and manifest_end may follow (R10)', () => {
+    for (const [name, settle] of ends) {
+      const ok = capture(settle).report;
+      expect(ok.refused, name).toBeNull();
+      const late = capture(settle, (t) => void t.open());
+      expect(late.report.refused, name).toMatchObject({ rule: 'R10', at: late.marks.next, reason: expect.stringMatching(/after the capture ended/) });
+      const note = capture(settle, (t) => void t.push('note', { detail: 'late' }));
+      expect(note.report.refused, name).toMatchObject({ rule: 'R10', at: note.marks.next });
+    }
+  });
+
+  it('settles an open socket with ws_close resync_failed in one record, and lets the capture reconnect after it', () => {
+    const { report } = capture((t) => void t.close('resync_failed'), (t) => {
+      t.subscribedSocket();
+      t.close('capture_end');
+    });
+    expect(report.refused).toBeNull();
+    expect(report.sockets.map((s) => [s.detail, s.refused])).toEqual([['resync_failed', null], ['capture_end', null]]);
+    expect(report.fixtureEligible).toBe(true);
+  });
+
+  it('refuses a record of any kind between the two records of a settlement, a note or a probe included (R10)', () => {
+    for (const between of [(t: Tape) => t.push('note', { detail: 'between' }), (t: Tape) => t.probe()]) {
+      const t = new Tape();
+      t.subscribedSocket();
+      t.error('network_error');
+      const at = between(t);
+      t.close('network_error');
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R10', at, reason: expect.stringMatching(/not followed directly by ws_close network_error/) });
+    }
+  });
+
+  it('counts a response whose success is not true as no acknowledgement: the socket never passes its gate (R9)', () => {
+    for (const rejected of ['book', 'trade', 'instrument'] as Channel[]) {
+      const t = new Tape();
+      t.open();
+      const ids = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, t.sub(c)] as const);
+      for (const [c, id] of ids) t.ack(id, c, { success: c !== rejected });
+      t.instrument();
+      t.book('snapshot');
+      t.book();
+      t.close('capture_end');
+      const records = t.end();
+      schemaValid(records);
+      const r = analyzeCapture(records, BTC);
+      expect(r.sockets[0]!.gate, rejected).toBeNull();
+      expect(r.sockets[0]!.window, rejected).toBeNull();
+      expect(r.fixtureEligible, rejected).toBe(false);
+    }
+  });
+
+  it('refuses a request that reuses an earlier req_id of the capture, on the same socket or a later one (R10)', () => {
+    const same = new Tape();
+    same.open();
+    const first = same.sub('book');
+    const at = same.records.length;
+    same.sub('trade', 'BTC/USD', first);
+    same.close('capture_end');
+    const records = same.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R10', at, reason: expect.stringMatching(/does not exceed every earlier req_id/) });
+
+    const later = new Tape();
+    later.subscribedSocket();
+    later.close('liveness_timeout');
+    later.open();
+    const reusedAt = later.records.length;
+    later.sub('book', 'BTC/USD', 3);
+    later.close('capture_end');
+    const again = later.end();
+    schemaValid(again);
+    expect(analyzeCapture(again, BTC).refused).toMatchObject({ rule: 'R10', at: reusedAt, reason: expect.stringMatching(/does not exceed every earlier req_id/) });
+  });
+
+  it("gives a segment no probe received after its last record, although it lies in the socket's window (section 5.6)", () => {
+    const t = new Tape();
+    const a = t.subscribedSocket({ timed: false });
+    const end = t.book();
+    const probe = t.probe();
+    t.book();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const socket = analyzeCapture(records, BTC).sockets[0]!;
+    expect(inWindow(analyzeCapture(records, BTC), probe)).toBe(true);
+    const owned = ownedClockSamples(records, socket, a.update, end);
+    expect(owned.rest).toEqual([]);
+    expect(owned.source).toBe('none');
+    // The same probe is the segment's once the segment reaches it.
+    expect(ownedClockSamples(records, socket, a.update, probe + 1).rest).toEqual([probe]);
+  });
+});
+
+describe('the manifest\'s REST specification (R5, sections 5.10 step (1) and 8.4)', () => {
+  /** A capture with one subscribed socket whose manifest's REST AssetPairs payload is `edit` applied to the example's. */
+  const withRest = (edit: (payload: any) => void, build: (t: Tape) => void = (t) => void t.subscribedSocket(), instrument: SelectedInstrument = BTC) => {
+    const t = new Tape();
+    const spec = t.records[0]!.instrumentSpec as { payload: string };
+    const payload = JSON.parse(spec.payload);
+    edit(payload);
+    spec.payload = JSON.stringify(payload);
+    build(t);
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    return { records, report: analyzeCapture(records, instrument) };
+  };
+  const entry = (p: any): any => p.result.XXBTZUSD;
+
+  it('accepts the example payload, and one whose REST status is absent (an absent REST status is no disagreement)', () => {
+    expect(withRest(() => {}).report).toMatchObject({ refused: null, fixtureEligible: true });
+    expect(withRest((p) => delete entry(p).status).report).toMatchObject({ refused: null, fixtureEligible: true });
+  });
+
+  it('refuses the capture at its manifest when the REST status is present and not online (R5)', () => {
+    for (const status of ['delisted', 'cancel_only', 'maintenance', '']) {
+      expect(withRest((p) => (entry(p).status = status)).report.refused, status).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/gives status/) });
+    }
+  });
+
+  it('refuses the capture at its manifest when REST lists the pair\'s REST name more than once, or not at all (R5)', () => {
+    const twice = withRest((p) => (p.result.XBTUSD = structuredClone(entry(p)))).report.refused;
+    expect(twice).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/lists XBTUSD more than once/) });
+    for (const [name, edit] of [
+      ['empty result', (p: any) => (p.result = {})],
+      ['another pair only', (p: any) => (entry(p).altname = 'ETHUSD')],
+      ['the WebSocket name, not the REST name', (p: any) => (entry(p).altname = 'XBT/USD')],
+    ] as const) {
+      expect(withRest(edit).report.refused, name).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/has no entry for XBTUSD/) });
+    }
+    // The REST name is the adapter's fixed mapping unless the caller names another; a pair with no known REST name is refused.
+    expect(withRest(() => {}, undefined, { ...BTC, restName: 'XXBTZUSD' }).report.refused).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/no entry for XXBTZUSD/) });
+    expect(withRest(() => {}, (t) => void t.open(), { ...BTC, symbol: 'ETH/USD' }).report.refused).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/no REST name is known/) });
+  });
+
+  it('refuses the capture at its manifest when the REST payload is not JSON, reports an error, or is not the AssetPairs shape (R5)', () => {
+    const t = new Tape();
+    (t.records[0]!.instrumentSpec as { payload: string }).payload = '{"error":[],"result":';
+    t.subscribedSocket();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/missing, malformed or reports an error/) });
+    for (const [name, edit] of [
+      ['an error', (p: any) => (p.error = ['EGeneral:Temporary lockout'])],
+      ['no error list', (p: any) => delete p.error],
+      ['result a list', (p: any) => (p.result = [entry(p)])],
+      ['no result', (p: any) => delete p.result],
+    ] as const) {
+      expect(withRest(edit).report.refused, name).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/missing, malformed or reports an error/) });
+    }
+    for (const [name, edit] of [
+      ['pair_decimals a string', (p: any) => (entry(p).pair_decimals = '1')],
+      ['lot_decimals missing', (p: any) => delete entry(p).lot_decimals],
+      ['tick_size a number', (p: any) => (entry(p).tick_size = 0.1)],
+      ['tick_size in exponent form', (p: any) => (entry(p).tick_size = '1e-1')],
+    ] as const) {
+      expect(withRest(edit).report.refused, name).toMatchObject({ rule: 'R5', at: 0, reason: expect.stringMatching(/lacks integer pair_decimals/) });
+    }
+  });
+
+  it('refuses the capture at its first instrument snapshot when REST pair_decimals, lot_decimals or tick_size disagrees with it (R5)', () => {
+    let gate = -1;
+    const build = (t: Tape): void => void (gate = t.subscribedSocket().gate);
+    for (const [name, edit] of [
+      ['pair_decimals', (p: any) => (entry(p).pair_decimals = 2)],
+      ['lot_decimals', (p: any) => (entry(p).lot_decimals = 6)],
+      ['tick_size', (p: any) => (entry(p).tick_size = '0.01')],
+    ] as const) {
+      const { report } = withRest(edit, build);
+      expect(report.refused, name).toMatchObject({ rule: 'R5', at: gate, reason: expect.stringMatching(/manifest's REST specification disagree/) });
+      expect(report.fixtureEligible).toBe(false);
+    }
+    // tick_size is compared by value, so "0.10" agrees with 0.1.
+    expect(withRest((p) => (entry(p).tick_size = '0.10'), build).report.refused).toBeNull();
+    // The comparison is with the instrument channel, not only with the caller's specification: the caller agreeing with a
+    // REST payload the channel contradicts is still R5.
+    const { report } = withRest((p) => (entry(p).lot_decimals = 6), (t) => void (gate = t.subscribedSocket().gate), { ...BTC, qtyPrecision: 6 });
+    expect(report.refused).toMatchObject({ rule: 'R5', at: gate, reason: expect.stringMatching(/manifest's REST specification disagree/) });
+  });
+
+  it('checks the manifest before any other record: a bad REST payload is found at 0 even when a later record breaks another rule', () => {
+    const t = new Tape();
+    const spec = t.records[0]!.instrumentSpec as { payload: string };
+    spec.payload = JSON.stringify({ ...JSON.parse(spec.payload), result: {} });
+    t.book('update');
+    t.close('capture_end');
+    const records = t.end({ fileEnd: false });
+    schemaValid(records);
+    expect(analyzeCapture(records, BTC).refused).toMatchObject({ rule: 'R5', at: 0 });
   });
 });
 
