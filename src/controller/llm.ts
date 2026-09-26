@@ -27,10 +27,13 @@ export interface LlmProposalJson {
 
 export const LLM_SYSTEM_PROMPT = [
   'You are the slow steering controller for a passive quoting policy in a paper-trading research replay.',
-  'You receive a review of the window that just ended and must answer with ONE JSON object and nothing else:',
+  'You receive a review of the window that just ended. Reply with exactly one JSON object in this shape and no other text:',
   '{"params": {"spreadMultiplierMilli": int, "sizeMultiplierMilli": int, "maxInventoryFractionMilli": int, "inventorySkewBps": int, "quoteSides": "both"|"bid_only"|"ask_only"|"none"}, "reason": string}',
   `Bounds: ${JSON.stringify(INSTRUCTION_BOUNDS)}`,
-  'Out-of-bounds values are rejected and the prior instruction stays in force. Prefer small changes.',
+  'If any param is not an integer inside its bounds, quoteSides is not one of the listed values, or params has an unknown key, '
+    + 'the whole instruction is rejected and the prior instruction stays in force.',
+  `A reason longer than ${INSTRUCTION_BOUNDS.reasonMaxLength} characters is truncated, not rejected.`,
+  'Prefer small changes.',
 ].join('\n');
 
 export function renderReviewPrompt(review: WindowReview, ctx: ControllerContext): string {

@@ -40,4 +40,23 @@ describe('LLM controller interface (no network)', () => {
     expect(s.ledger.ofType('instruction_rejected').map((x) => x.reason)).toEqual(['late', 'late']);
     expect(s.summary.instructions.finalVersion).toBe(0);
   });
+
+  it('truncates an overlong reason instead of rejecting it; a non-integer or unknown param rejects the whole instruction', async () => {
+    const ok = '"spreadMultiplierMilli": 1000, "sizeMultiplierMilli": 1000, "maxInventoryFractionMilli": 1000, "inventorySkewBps": 20, "quoteSides": "both"';
+    const long = client([`{"params": {${ok}}, "reason": "${'x'.repeat(300)}"}`]);
+    const r = await replay({ fixture: makeFixture(books, { durationMs: 9000 }), policy: new MarketMakerPolicy(DEFAULT_POLICY), controller: new LlmSteeringController(long, { modeledLatencyMs: 0 }), config: testConfig() });
+    const acc = r.ledger.ofType('instruction_accepted');
+    expect(acc).toHaveLength(2);
+    expect(acc[0]!.instruction.reason).toBe('x'.repeat(240));
+
+    const bad = client([
+      `{"params": {${ok.replace('"inventorySkewBps": 20', '"inventorySkewBps": 20.5')}}, "reason": "fractional"}`,
+      `{"params": {${ok}, "extra": 1}, "reason": "unknown key"}`,
+    ]);
+    const s = await replay({ fixture: makeFixture(books, { durationMs: 9000 }), policy: new MarketMakerPolicy(DEFAULT_POLICY), controller: new LlmSteeringController(bad, { modeledLatencyMs: 0 }), config: testConfig() });
+    const rej = s.ledger.ofType('instruction_rejected');
+    expect(rej.map((x) => x.reason)).toEqual(['invalid', 'invalid']);
+    expect(rej.map((x) => x.keptInstructionVersion)).toEqual([0, 0]);
+    expect(s.summary.instructions.finalVersion).toBe(0);
+  });
 });
