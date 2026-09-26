@@ -59,6 +59,12 @@ out/<scenario>/<run>.ledger.jsonl      the full hash-chained ledger of that run 
 
 The console summary prints the synthetic label first, then a run comparison table, the steered run's per-window table (instruction version, spread/size/skew/sides in effect, submissions, risk rejections, cancels, fills, shortest-horizon markout, net P&L, inventory, mid change), the instruction history with each controller reason, kill-switch events, and the fill-uncertainty counters.
 
+## Repeating a run
+
+`tests/engine.test.ts` (`replay determinism`) replays both shipped scenarios as `no_trade`, `unsteered`, and `steered`, twice, and requires identical ledger JSONL and identical run summaries. To repeat from the CLI, check out one commit and run `npm run demo` twice. Compare `out/<scenario>/no_trade.ledger.jsonl`, `unsteered.ledger.jsonl`, and `steered.ledger.jsonl`. `results.json` stores each ledger path under `ledgers`, so compare that file only when both runs used the same output path. Console text includes wall time and is not a comparison artifact. A rejected configuration still leaves no output directory.
+
+That repeat is the offline recovery. Production deployment and rollback requirements, with the target left blank, are in [DEPLOYMENT_ROLLBACK.md](DEPLOYMENT_ROLLBACK.md).
+
 Read the numbers as **mechanics**, not performance: with fixed placement and cancel costs a policy that requotes every tick pays for every message, and both trading runs in the shipped scenarios end with negative net P&L. That is the honest output of a conservative model on synthetic data.
 
 ## Adding a scenario or fixture
