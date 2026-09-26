@@ -1,0 +1,86 @@
+#!/bin/sh
+# A10 pre-push check (docs/M2_DATA_CONTRACT.md section 6.5). Opt in once per clone, from the repository root, by copying
+# it into the clone's own hooks directory:
+#
+#   cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push" && chmod +x "$(git rev-parse --git-path hooks)/pre-push"
+#
+# (cp onto an existing copy keeps that copy's mode, and git skips a hook that is not executable.)
+#
+# A copy in .git/hooks stays active whatever commit is checked out, and refuses a push from a checkout that lacks the
+# scan (below). `git config core.hooksPath .githooks` also enables it, but that path is resolved against the working
+# tree, so the hook silently disappears while a commit without .githooks/pre-push is checked out (main before this rule
+# was merged, or an older commit), and pushes from that checkout then go through unscanned.
+#
+# Before git sends anything, it runs the repository rule of tests/jsonl-policy.ts over the commits of each pushed ref
+# and refuses the push if any of them carries something the rule rejects (any file under a captures/ or normalized/
+# directory at any depth, a normalize report outside its name, closed schema, canonical bytes, order, pairings,
+# cross-references or bounds, an unclassified .jsonl file, or a raw capture record on a line of its own, or in one of
+# the forms tests/jsonl-policy.ts lists, in any other tracked UTF-8 text file, in a commit message or in the message or
+# header of an annotated tag it pushes), including a file that was added and deleted again before the push; a git notes
+# ref is scanned like any ref, its notes being files of its commits. For a ref the remote already has, it scans the
+# commits between the remote's value and the pushed commit, or every commit reachable from the pushed commit when the
+# remote's value is not in this clone (after a history rewrite, for example); for a new remote ref, every commit
+# reachable from the pushed commit (the clone's remote-tracking refs are not trusted, since they may be stale). It also
+# refuses a pushed ref that does not point, directly or through an annotated tag, at a commit, since a tag on a tree or
+# a blob carries files no commit scan sees. It needs node_modules (npm ci) and the scan in the checked-out tree, and
+# refuses the push when it cannot run, or while the checkout's .githooks/pre-push differs from this copy. Its git
+# commands and the scan ignore replace refs, so they read the objects the push sends.
+#
+# It is a local, bypassable control, not a guarantee and not complete prevention: `git push --no-verify`, a clone where
+# it is not installed, an edited or non-executable hook, another git client and an upload through the GitHub web
+# interface all skip it; an edit, committed or not, of the rule, the scan, the engine code or the schemas in the
+# checkout it runs from, or a changed node_modules, weakens it without skipping it (the self-check below compares this
+# hook file only); it reads nothing outside git; and it sees only what the rule covers (not a record spread over several
+# lines, embedded in other text in any way other than those forms, compressed, encoded or binary). The CI history step
+# (npm run test:history) detects the same things only after a push, and only for a pull request's range or a push to
+# main, and it reads no tag message.
+
+# Every git command below, and the scan's, reads the objects a push sends, never replacements (git replace).
+export GIT_NO_REPLACE_OBJECTS=1
+# An installed copy is frozen when it is copied; when the checkout's own .githooks/pre-push differs from it, the push is
+# refused until the copy is refreshed from a checkout of the current branch. Only copies that carry this check refuse:
+# a copy of an older .githooks/pre-push, or one made before this check existed, does not, and must be replaced.
+if [ -f .githooks/pre-push ] && ! cmp -s "$0" .githooks/pre-push; then
+  echo "A10 pre-push: this hook ($0) differs from the checkout's .githooks/pre-push; copy it again from a checkout of the current branch (cp .githooks/pre-push \"\$(git rev-parse --git-path hooks)/pre-push\") and push again; refusing the push" >&2
+  exit 1
+fi
+tsx="node_modules/.bin/tsx"
+if [ ! -x "$tsx" ]; then
+  echo "A10 pre-push: $tsx is missing (run npm ci first); refusing the push" >&2
+  exit 1
+fi
+# The scan and the rule are the working tree's copies, uncommitted edits included, and so are the engine code and the
+# schemas the rule loads; a checkout that lacks the scan or the rule cannot scan, so the push is refused.
+if [ ! -f tests/a10-history-cli.ts ] || [ ! -f tests/jsonl-policy.ts ]; then
+  echo "A10 pre-push: this checkout has no tests/a10-history-cli.ts or tests/jsonl-policy.ts, so nothing can be scanned; refusing the push" >&2
+  exit 1
+fi
+status=0
+refused=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+  if ! git rev-parse -q --verify "$local_sha^{commit}" >/dev/null; then
+    echo "A10 pre-push: $local_ref does not point at a commit (directly or through an annotated tag); refusing the push" >&2
+    status=1
+    refused="$refused $local_ref"
+    continue
+  fi
+  case "$remote_sha" in
+    *[!0]*)
+      if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        echo "A10 pre-push: the remote's $remote_ref ($remote_sha) is not in this clone; scanning every commit reachable from $local_sha" >&2
+        remote_sha=0
+      fi ;;
+  esac
+  case "$remote_sha" in
+    *[!0]*) "$tsx" tests/a10-history-cli.ts --revs "$remote_sha..$local_sha" </dev/null || { status=1; refused="$refused $local_ref"; } ;;
+    *) "$tsx" tests/a10-history-cli.ts --revs "$local_sha" </dev/null || { status=1; refused="$refused $local_ref"; } ;;
+  esac
+  if [ "$(git cat-file -t "$local_sha")" = tag ]; then
+    "$tsx" tests/a10-history-cli.ts --tag "$local_sha" </dev/null || { status=1; refused="$refused $local_ref"; }
+  fi
+done
+if [ "$status" -ne 0 ]; then
+  echo "A10 pre-push: refusing the push of$refused; see the lines above" >&2
+fi
+exit $status

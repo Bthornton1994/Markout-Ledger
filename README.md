@@ -25,12 +25,14 @@ Requires Node.js >= 22.
 
 ```bash
 npm install
+cp .githooks/pre-push "$(git rev-parse --git-path hooks)/pre-push" && chmod +x "$(git rev-parse --git-path hooks)/pre-push"   # optional: the opt-in, bypassable A10 pre-push check; re-copy whenever .githooks/pre-push changes (docs/M2_DATA_CONTRACT.md section 6.5)
 npm run typecheck      # tsc --noEmit
-npm test               # vitest, behavioural tests
+npm test               # vitest, behavioural tests (includes the schema tests)
+npm run test:schemas   # JSON Schema validation only: schemas/ against schemas/examples/ and failure cases
 npm run demo           # replays both scenarios, prints summaries, writes out/<scenario>/
 ```
 
-The same three commands run in CI on every pull request (`.github/workflows/ci.yml`), which also uploads the demo's `out/` directory as a build artifact.
+CI is triggered by pull requests and by pushes to `main` (`.github/workflows/ci.yml`), and by nothing else; GitHub starts no run for a commit message carrying a skip instruction (`[skip ci]` and its variants), for a pull request with a merge conflict, or for a fork pull request awaiting approval (contract §6.5). It first scans every commit of the pull request's range, or of the push (every commit reachable from the head when the push's base is not in the checkout), for files the repository rule A10 rejects (`npm run test:history`; this detects a file already pushed and prevents nothing, contract §6.5), then runs the schema validation as its own step, then the same three commands, and uploads the demo's `out/` directory as a build artifact.
 
 `npm run demo` replays two fixed, seeded fixtures (13 and 12 controller windows) and compares three runs on each:
 
@@ -72,6 +74,7 @@ docs/           schema, accounting, execution model, controller contract, replay
 - [docs/CONTROLLER.md](docs/CONTROLLER.md): two-clock timing, instruction contract and bounds, acceptance rules, the LLM interface
 - [docs/REPLAY.md](docs/REPLAY.md): commands, flags, outputs, adding scenarios
 - [docs/DATA_REQUIREMENTS.md](docs/DATA_REQUIREMENTS.md): limitations of the synthetic data and what real data a credible evaluation needs
+- Milestone 2 (recorded data, contract only, no implementation yet; venue Kraken spot `BTC/USD`, selected provisionally): [docs/M2_DATA_SOURCE_DECISION.md](docs/M2_DATA_SOURCE_DECISION.md), [docs/M2_DATA_CONTRACT.md](docs/M2_DATA_CONTRACT.md), [docs/M2_EVALUATION_PROTOCOL.md](docs/M2_EVALUATION_PROTOCOL.md), [docs/M2_GROK_HANDOFF.md](docs/M2_GROK_HANDOFF.md); machine-readable schemas in `schemas/`. No recorded data is committed. The P0 listing does not run until decision conditions C2 and C3 are met, each confirmed or re-confirmed with the date of that reading before the listing, C3 from a reading made on the day of the listing, and nothing is captured until C2, C3 and C5 are met (C5 is the owner's dated reading of the live pages M2_DATA_SOURCE_DECISION.md §4 lists, among them those behind `tradeIdOrdered`, `per_fill` and the 15 s liveness timeout); none of the three is met. C2 requires each of four uses (automated first-party access to the public WebSocket API v2 and to the public REST endpoints the capture and P0 use (`AssetPairs`, `Time`), private retention of the raw captures on the owner's host, the research use of this project, and publication, in this public repository and its pull requests, of outputs derived from captured data other than the recorded data itself (for C2, cleared at least for the P0 statement and the A12 outputs; every other derived output, later evaluation reports and grids included, is published only once a further attested clearance names it)) to be cleared separately, either by Kraken's written permission for that use or Kraken's written clarification concluding that it is permitted, or by a qualified lawyer's reasoned written opinion, from a lawyer acting for the owner (not the authors, the implementer or an AI tool), concluding that the applicable Kraken terms, read as current on a stated date, neither prohibit that use nor require Kraken's permission or consent for it; where counsel concludes, or cannot rule out, that Kraken's consent is required, only Kraken's written permission for that use clears it. Model training on any capture, and publishing recorded data itself, are further uses, each excluded unless it is itself cleared, expressly and by name, under the same routes and test. The owner keeps the underlying record and posts on pull request #3 only a nonprivileged attestation, subject to counsel's advice about disclosure. C3 is the owner's written confirmation on pull request #3, from the live page and with the date of that reading, that the host that runs the P0 listing and every capture is located in, and the person who operates it resides in, a US state Kraken serves for spot (the state need not be named publicly). Raw captures never enter Git, and a recorded fixture is committed only if publishing recorded data is itself cleared in writing, expressly and by name.
 
 ## Guarantees the tests establish
 
@@ -96,4 +99,4 @@ Each of these is a test in `tests/` that exercises the public interfaces rather 
 
 Milestone 1 delivers the engine, ledger contract and CLI. Not included by design: a dashboard, live data adapters, an actual model-backed controller, RL, order routing, or any credential handling. The synthetic generator is a test harness, not a market model.
 
-License: not yet chosen by the repository owner (`package.json` says `UNLICENSED`, private).
+License: not yet chosen by the repository owner. The repository is public; `package.json` still says `UNLICENSED` (and `private: true`, which only prevents npm publication). Until the owner picks a licence, no licence is granted.

@@ -11,11 +11,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the A10 history step scans every commit of the range
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: A10 history scan (every commit of the pull request or push range)
+        env:
+          A10_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          A10_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: npm run test:history -- --base "$A10_BASE" --head "$A10_HEAD"
+      - name: Validate JSON Schemas (draft 2020-12, strict, with formats)
+        run: npm run test:schemas
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Bthornton1994/Markout-Ledger/schemas/normalize-report.v1.schema.json",
+  "title": "Markout Ledger normalize report (report format v1)",
+  "description": "The sidecar <captureId>.normalize-report.json that the normalizer writes once per run whose raw manifest_start is readable and that is not refused over the report its --supersedes names (contract section 5.10), beside the fixtures <captureId>-seg<segmentIndex>.jsonl it writes, also when it writes none (docs/M2_DATA_CONTRACT.md section 5.10). The report is the data boundary of what a normalization may publish: counts, reason codes, rejection rules, raw record indices, hashes, the run's options and version and provenance metadata; no value of another kind fits, which does not keep a recorded value out of these kinds (below). Every object is closed to undeclared properties, every map is closed to undeclared keys (the dropped and count keys, and the field names a rule may name, are fixed lists), every number is a non-negative integer (a count at most 2^53 - 1; the repository rule bounds every number so) and every string is an enumerated code or fixed name, a lower-case hex hash, a lower-case UUID version 4, a version or commit identifier or a fixture file name, so no free text, lexeme or payload excerpt fits. A run refused at capture level carries no segments, cuts, dropped items or counts; any other run carries every named dropped and count key. What the schema cannot rule out is a recorded value encoded into one of those constrained values: an integer placed in any integer field, the number of entries in an array, the choice among the enumerated codes a value may take or between null and a value where the rules leave that choice, bytes hex-encoded into a hash, UUID, commit or version string, whether supersedes is present and whether it is empty, and the directory a report is committed in. Review remains the control for that. The repository rule also requires a tracked report's bytes to be exactly its canonical serialization, with every object's keys sorted and its arrays in the contract's order, each fixtureFile to name its own capture and segment, each rule to carry its own scope and fields, its cross-references to agree and its file name to be <captureId>.normalize-report.json (sections 5.10 and 6.5), so a duplicated key, whitespace or the order of keys or entries carries nothing either. Publication of any report still follows decision condition C2's use (iv).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reportFormatVersion", "captureId", "captureFormatVersion", "fixtureSchemaVersion", "normalizer", "adapter", "options", "rawFiles", "segments", "rejections", "cuts", "dropped", "counts"],
+  "properties": {
+    "reportFormatVersion": { "const": 1 },
+    "captureId": { "$ref": "#/$defs/uuid" },
+    "captureFormatVersion": { "type": "integer", "minimum": 1, "description": "the version the raw manifest_start declares, also when it is unsupported (R1)" },
+    "fixtureSchemaVersion": { "const": 2 },
+    "normalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "commit"],
+      "properties": { "name": { "const": "markout-ledger" }, "version": { "$ref": "#/$defs/semver" }, "commit": { "$ref": "#/$defs/commit" } }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": { "name": { "const": "kraken-spot-ws2" }, "version": { "$ref": "#/$defs/adapterVersion" } }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["depth", "minWindows", "windowMs"],
+      "description": "the run's normalize options (--depth, --min-windows, --window-ms)",
+      "properties": {
+        "depth": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "minWindows": { "type": "integer", "minimum": 1 },
+        "windowMs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rawFiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fileIndex", "sha256", "records"],
+        "properties": { "fileIndex": { "$ref": "#/$defs/count" }, "sha256": { "$ref": "#/$defs/sha256" }, "records": { "$ref": "#/$defs/count" } }
+      }
+    },
+    "segments": { "type": "array", "items": { "$ref": "#/$defs/segment" } },
+    "rejections": { "type": "array", "items": { "$ref": "#/$defs/rejection" } },
+    "cuts": { "type": "array", "items": { "$ref": "#/$defs/cut" } },
+    "dropped": {
+      "type": "object",
+      "description": "the dropped keys the contract names, each with its count and the raw records that carried the dropped items (record references only, never the items)",
+      "additionalProperties": false,
+      "properties": {
+        "depthBeforeSnapshot": { "$ref": "#/$defs/droppedEntry" },
+        "depthWhileUnsynced": { "$ref": "#/$defs/droppedEntry" },
+        "depthBeforeSubscribed": { "$ref": "#/$defs/droppedEntry" },
+        "deleteOfUnknownLevel": { "$ref": "#/$defs/droppedEntry" },
+        "depthDuplicate": { "$ref": "#/$defs/droppedEntry" },
+        "exponentLexemeInBook": { "$ref": "#/$defs/droppedEntry" },
+        "tradeSnapshotHistory": { "$ref": "#/$defs/droppedEntry" },
+        "tradeOffBook": { "$ref": "#/$defs/droppedEntry" },
+        "tradeWhileUnsynced": { "$ref": "#/$defs/droppedEntry" },
+        "tradeDuplicate": { "$ref": "#/$defs/droppedEntry" },
+        "tradeIdRegression": { "$ref": "#/$defs/droppedEntry" },
+        "foreignSymbol": { "$ref": "#/$defs/droppedEntry" },
+        "offTickPrice": { "$ref": "#/$defs/droppedEntry" },
+        "offLotSize": { "$ref": "#/$defs/droppedEntry" },
+        "nonPositiveTradeSize": { "$ref": "#/$defs/droppedEntry" },
+        "undecodable": { "$ref": "#/$defs/droppedEntry" },
+        "socketNotSubscribed": { "$ref": "#/$defs/droppedEntry" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "description": "records by type, and taker order types (a taker ord_type other than limit or market is counted as other and never named, contract section 8.3)",
+      "additionalProperties": false,
+      "properties": {
+        "records.manifest_start": { "$ref": "#/$defs/count" },
+        "records.file_start": { "$ref": "#/$defs/count" },
+        "records.ws_open": { "$ref": "#/$defs/count" },
+        "records.ws_close": { "$ref": "#/$defs/count" },
+        "records.ws_error": { "$ref": "#/$defs/count" },
+        "records.subscribe": { "$ref": "#/$defs/count" },
+        "records.unsubscribe": { "$ref": "#/$defs/count" },
+        "records.ping": { "$ref": "#/$defs/count" },
+        "records.message": { "$ref": "#/$defs/count" },
+        "records.probe": { "$ref": "#/$defs/count" },
+        "records.note": { "$ref": "#/$defs/count" },
+        "records.file_end": { "$ref": "#/$defs/count" },
+        "records.manifest_end": { "$ref": "#/$defs/count" },
+        "trades.ordType.limit": { "$ref": "#/$defs/count" },
+        "trades.ordType.market": { "$ref": "#/$defs/count" },
+        "trades.ordType.other": { "$ref": "#/$defs/count" }
+      }
+    },
+    "supersedes": {
+      "type": "array",
+      "description": "present only when the run was given --supersedes <earlier report>: that report's written segments whose fixture hash this run does not reproduce (contract sections 5.10 and 9)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["segmentIndex", "fixtureSha256", "normalizerVersion", "normalizerCommit", "adapterVersion"],
+        "properties": {
+          "segmentIndex": { "$ref": "#/$defs/count" },
+          "fixtureSha256": { "$ref": "#/$defs/sha256" },
+          "normalizerVersion": { "$ref": "#/$defs/semver" },
+          "normalizerCommit": { "$ref": "#/$defs/commit" },
+          "adapterVersion": { "$ref": "#/$defs/adapterVersion" }
+        }
+      }
+    }
+  },
+  "if": { "properties": { "rejections": { "type": "array", "contains": { "type": "object", "properties": { "scope": { "const": "capture" } }, "required": ["scope"] } } }, "required": ["rejections"] },
+  "then": { "properties": { "rejections": { "type": "array", "items": { "type": "object", "properties": { "scope": { "const": "capture" } } } }, "segments": { "type": "array", "maxItems": 0 }, "cuts": { "type": "array", "maxItems": 0 }, "dropped": { "type": "object", "maxProperties": 0 }, "counts": { "type": "object", "maxProperties": 0 } } },
+  "else": { "properties": { "dropped": { "type": "object", "properties": { "depthBeforeSnapshot": true, "depthWhileUnsynced": true, "depthBeforeSubscribed": true, "deleteOfUnknownLevel": true, "depthDuplicate": true, "exponentLexemeInBook": true, "tradeSnapshotHistory": true, "tradeOffBook": true, "tradeWhileUnsynced": true, "tradeDuplicate": true, "tradeIdRegression": true, "foreignSymbol": true, "offTickPrice": true, "offLotSize": true, "nonPositiveTradeSize": true, "undecodable": true, "socketNotSubscribed": true }, "required": ["depthBeforeSnapshot", "depthWhileUnsynced", "depthBeforeSubscribed", "deleteOfUnknownLevel", "depthDuplicate", "exponentLexemeInBook", "tradeSnapshotHistory", "tradeOffBook", "tradeWhileUnsynced", "tradeDuplicate", "tradeIdRegression", "foreignSymbol", "offTickPrice", "offLotSize", "nonPositiveTradeSize", "undecodable", "socketNotSubscribed"] }, "counts": { "type": "object", "properties": { "records.manifest_start": true, "records.file_start": true, "records.ws_open": true, "records.ws_close": true, "records.ws_error": true, "records.subscribe": true, "records.unsubscribe": true, "records.ping": true, "records.message": true, "records.probe": true, "records.note": true, "records.file_end": true, "records.manifest_end": true, "trades.ordType.limit": true, "trades.ordType.market": true, "trades.ordType.other": true }, "required": ["records.manifest_start", "records.file_start", "records.ws_open", "records.ws_close", "records.ws_error", "records.subscribe", "records.unsubscribe", "records.ping", "records.message", "records.probe", "records.note", "records.file_end", "records.manifest_end", "trades.ordType.limit", "trades.ordType.market", "trades.ordType.other"] } } },
+  "$defs": {
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", "description": "a lower-case UUID version 4 (contract section 3)" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+    "semver": { "type": "string", "pattern": "^[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$" },
+    "adapterVersion": { "type": "string", "pattern": "^[0-9]{1,6}$" },
+    "recordRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileIndex", "record"],
+      "properties": { "fileIndex": { "$ref": "#/$defs/count" }, "record": { "$ref": "#/$defs/count" } }
+    },
+    "droppedEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "records"],
+      "properties": { "count": { "$ref": "#/$defs/count" }, "records": { "type": "array", "items": { "$ref": "#/$defs/recordRef" } } }
+    },
+    "rule": { "enum": ["R1", "R1b", "R2", "R2b", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10"] },
+    "cutReason": { "enum": ["checksum_mismatch", "snapshot_reset", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth", "gap_sequence"] },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segmentIndex", "status", "startReason", "endReason", "start", "end", "events", "fixtureFile", "fixtureSha256", "rule"],
+      "properties": {
+        "segmentIndex": { "$ref": "#/$defs/count" },
+        "status": { "enum": ["written", "too_short", "refused"] },
+        "startReason": { "enum": ["capture_start", "resync_after_gap", "resync_after_clock_cut"] },
+        "endReason": { "enum": ["capture_end", "checksum_mismatch", "snapshot_reset", "gap_disconnect", "clock_cut", "reconstruction_failure", "malformed_depth", "gap_sequence"] },
+        "start": { "$ref": "#/$defs/recordRef" },
+        "end": { "$ref": "#/$defs/recordRef" },
+        "events": { "$ref": "#/$defs/count" },
+        "fixtureFile": { "type": ["string", "null"], "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-seg[0-9]{1,6}\\.jsonl$" },
+        "fixtureSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "rule": { "enum": ["R2", "R2b", "R6", "R7", null], "description": "the segment-level rule that refused the segment (R7: too short); null when it was written" }
+      },
+      "if": { "properties": { "status": { "const": "written" } }, "required": ["status"] },
+      "then": { "properties": { "fixtureFile": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}-seg[0-9]{1,6}\\.jsonl$" }, "fixtureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "rule": { "const": null } } },
+      "else": { "properties": { "fixtureFile": { "const": null }, "fixtureSha256": { "const": null }, "rule": { "enum": ["R2", "R2b", "R6", "R7"] } } }
+    },
+    "rejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "scope", "segmentIndex", "at", "field"],
+      "properties": {
+        "rule": { "$ref": "#/$defs/rule" },
+        "scope": { "enum": ["capture", "socket", "segment", "item"], "description": "socket: an R9 socket, reported once with the record of its ws_open; it adds no segments entry and uses up no segmentIndex" },
+        "segmentIndex": { "oneOf": [{ "$ref": "#/$defs/count" }, { "type": "null" }] },
+        "at": { "oneOf": [{ "$ref": "#/$defs/recordRef" }, { "type": "null" }] },
+        "field": {
+          "enum": ["manifestEnd", "captureFormatVersion", "capturer", "recvWallMs", "recvMonoNs", "price", "size", "priceDecimals", "qtyDecimals", "priceIncrement", "qtyIncrement", "instrumentSpec", "pair", "status", "rights", null],
+          "description": "the name of the field a rule names (R1, R4, R5, R8), from this fixed list, never its value; null when the rule names none (a missing or unreadable manifest_start yields no report, contract section 5.10)"
+        }
+      }
+    },
+    "cut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["segmentIndex", "reason", "at"],
+      "properties": { "segmentIndex": { "$ref": "#/$defs/count" }, "reason": { "$ref": "#/$defs/cutReason" }, "at": { "$ref": "#/$defs/recordRef" } }
+    }
+  }
+}

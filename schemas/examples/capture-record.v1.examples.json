@@ -1,0 +1,58 @@
+{
+  "description": "Valid raw capture records (capture format v1, docs/M2_DATA_CONTRACT.md section 4), one or more per record type. The records are constructed for illustration and dated on a hypothetical day after decision conditions C2 and C3 are met; no record is a captured venue message. The payloads follow the venue's documented message shapes; some book prices and quantities (62710.4 x 0.01, 62710.5 x 0.93111634, price 62709.1) reuse the official kraken-cli test fixture (MIT licence, crates/kraken-core/src/subscribe/message/channel_message.rs:190-194, commit aa56e5976be5; the examples write quantities as eight-place lexemes, and the checksums are computed over the examples' own lexemes). The snapshot's checksum (2617805479) is computed over its levels, and the update's (1396696505) over the book after the update is applied to that snapshot, by the rule of contract section 8.2 (its test vector 2). tests/schemas.test.ts validates each example against schemas/capture-record.v1.schema.json and derives the deliberate failure cases from them.",
+  "examples": {
+    "manifest_start": {
+      "type": "manifest_start",
+      "recvWallMs": 1791288000000,
+      "recvMonoNs": "5000000000000",
+      "captureFormatVersion": 1,
+      "captureId": "123e4567-e89b-42d3-a456-426614174000",
+      "venue": "kraken-spot",
+      "instrument": "BTC/USD",
+      "streams": [
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":[\"BTC/USD\"],\"depth\":100,\"snapshot\":true},\"req_id\":1}",
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"trade\",\"symbol\":[\"BTC/USD\"],\"snapshot\":false},\"req_id\":2}",
+        "{\"method\":\"subscribe\",\"params\":{\"channel\":\"instrument\",\"snapshot\":true},\"req_id\":3}"
+      ],
+      "endpoints": { "ws": "wss://ws.kraken.com/v2", "rest": "https://api.kraken.com" },
+      "capturer": { "name": "markout-ledger/capture", "version": "0.1.0", "commit": "0000000000000000000000000000000000000000" },
+      "host": { "os": "linux", "runtime": "node 22.22.2" },
+      "clock": { "source": "chrony", "report": "<verbatim chronyc tracking output>", "offsetMs": -0.31, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T11:59:59.800Z" },
+      "instrumentSpec": {
+        "source": "https://api.kraken.com/0/public/AssetPairs?pair=XBTUSD",
+        "fetchedAtIso": "2026-10-06T11:59:59.900Z",
+        "payload": "{\"error\":[],\"result\":{\"XXBTZUSD\":{\"altname\":\"XBTUSD\",\"wsname\":\"XBT/USD\",\"pair_decimals\":1,\"lot_decimals\":8,\"cost_decimals\":5,\"tick_size\":\"0.1\",\"ordermin\":\"0.0001\",\"costmin\":\"0.5\",\"status\":\"online\"}}}"
+      },
+      "startedAtIso": "2026-10-06T12:00:00.000Z"
+    },
+    "file_start": { "type": "file_start", "recvWallMs": 1791291600000, "recvMonoNs": "8600000000000", "fileIndex": 1, "previousFileSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    "ws_open": { "type": "ws_open", "recvWallMs": 1791288000050, "recvMonoNs": "5000050000000", "detail": "open" },
+    "ws_close": { "type": "ws_close", "recvWallMs": 1791288900000, "recvMonoNs": "5900000000000", "detail": "liveness_timeout" },
+    "ws_error": { "type": "ws_error", "recvWallMs": 1791288900010, "recvMonoNs": "5900010000000", "detail": "reconnect_budget_exhausted" },
+    "subscribe": { "type": "subscribe", "recvWallMs": 1791288000100, "recvMonoNs": "5000100000000", "request": "{\"method\":\"subscribe\",\"params\":{\"channel\":\"book\",\"symbol\":[\"BTC/USD\"],\"depth\":100,\"snapshot\":true},\"req_id\":1}" },
+    "unsubscribe": { "type": "unsubscribe", "recvWallMs": 1791288300000, "recvMonoNs": "5300000000000", "request": "{\"method\":\"unsubscribe\",\"params\":{\"channel\":\"book\",\"symbol\":[\"BTC/USD\"],\"depth\":100},\"req_id\":7}" },
+    "ping": { "type": "ping", "recvWallMs": 1791288030000, "recvMonoNs": "5030000000000", "request": "{\"method\":\"ping\",\"req_id\":42}" },
+    "message_status": { "type": "message", "recvWallMs": 1791288000060, "recvMonoNs": "5000060000000", "stream": "status", "payload": "{\"channel\":\"status\",\"type\":\"update\",\"data\":[{\"api_version\":\"v2\",\"connection_id\":1234567890,\"system\":\"online\",\"version\":\"2.0.0\"}]}" },
+    "message_subscribe_ack": { "type": "message", "recvWallMs": 1791288000140, "recvMonoNs": "5000140000000", "stream": "method:subscribe", "payload": "{\"method\":\"subscribe\",\"req_id\":1,\"result\":{\"channel\":\"book\",\"depth\":100,\"snapshot\":true,\"symbol\":\"BTC/USD\"},\"success\":true,\"time_in\":\"2026-10-06T12:00:00.121000Z\",\"time_out\":\"2026-10-06T12:00:00.121050Z\"}" },
+    "message_book_snapshot": { "type": "message", "recvWallMs": 1791288000150, "recvMonoNs": "5000150000000", "stream": "book", "payload": "{\"channel\":\"book\",\"type\":\"snapshot\",\"data\":[{\"symbol\":\"BTC/USD\",\"bids\":[{\"price\":62710.4,\"qty\":0.01000000}],\"asks\":[{\"price\":62710.5,\"qty\":0.93111634},{\"price\":62710.6,\"qty\":0.50000000},{\"price\":62711.0,\"qty\":1.20000000}],\"checksum\":2617805479}]}" },
+    "message_book_update": { "type": "message", "recvWallMs": 1791288001123, "recvMonoNs": "5001123000000", "stream": "book", "payload": "{\"channel\":\"book\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"bids\":[{\"price\":62709.1,\"qty\":2.00000000}],\"asks\":[],\"checksum\":1396696505,\"timestamp\":\"2026-10-06T12:00:01.101234Z\"}]}" },
+    "message_trade": { "type": "message", "recvWallMs": 1791288001130, "recvMonoNs": "5001130000000", "stream": "trade", "payload": "{\"channel\":\"trade\",\"type\":\"update\",\"data\":[{\"symbol\":\"BTC/USD\",\"side\":\"buy\",\"price\":62710.5,\"qty\":0.00120000,\"ord_type\":\"market\",\"trade_id\":81234567,\"timestamp\":\"2026-10-06T12:00:01.129001Z\"}]}" },
+    "message_pong": { "type": "message", "recvWallMs": 1791288030031, "recvMonoNs": "5030031000000", "stream": "method:pong", "payload": "{\"method\":\"pong\",\"req_id\":42}" },
+    "probe": { "type": "probe", "recvWallMs": 1791288600040, "recvMonoNs": "5600040000000", "url": "https://api.kraken.com/0/public/Time", "sentWallMs": 1791288600000, "sentMonoNs": "5600000000000", "payload": "{\"error\":[],\"result\":{\"unixtime\":1791288600,\"rfc1123\":\"Tue, 06 Oct 26 12:10:00 +0000\"}}" },
+    "note": { "type": "note", "recvWallMs": 1791288300000, "recvMonoNs": "5299999000000", "detail": "checksum mismatch on book record 1200; resubscribing" },
+    "file_end": { "type": "file_end", "recvWallMs": 1791291599990, "recvMonoNs": "8599990000000", "fileIndex": 0, "records": 120000, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    "manifest_end": {
+      "type": "manifest_end",
+      "recvWallMs": 1791293400000,
+      "recvMonoNs": "10400000000000",
+      "endedAtIso": "2026-10-06T13:30:00.000Z",
+      "clock": { "source": "chrony", "report": "<verbatim chronyc tracking output>", "offsetMs": -0.27, "stratum": 2, "synchronized": true, "takenAtIso": "2026-10-06T13:29:59.900Z" },
+      "counts": { "manifest_start": 1, "file_start": 1, "ws_open": 1, "ws_close": 1, "subscribe": 3, "ping": 180, "message": 187000, "probe": 9, "file_end": 2 },
+      "files": [
+        { "fileIndex": 0, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "records": 120000 },
+        { "fileIndex": 1, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "records": 67196 }
+      ],
+      "processingMs": { "p50": 0.04, "p99": 0.61, "max": 7.9 }
+    }
+  }
+}

@@ -3,3 +3,7 @@ out/
 dist/
 *.log
 .DS_Store
+
+# Milestone 2: raw captures and unpublished normalized output never enter Git (docs/M2_DATA_CONTRACT.md sections 6.3 and 6.5)
+captures/
+normalized/
