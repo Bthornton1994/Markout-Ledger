@@ -32,14 +32,20 @@ async function runScenario(name: 'baseline' | 'riskgate', kind: 'no_trade' | 'un
 }
 
 describe('replay determinism', () => {
-  it('produces byte-identical ledgers for identical inputs', async () => {
-    const a = await runScenario('baseline', 'steered');
-    const b = await runScenario('baseline', 'steered');
-    expect(a.ledger.headHash).toBe(b.ledger.headHash);
-    expect(a.ledger.toJsonl()).toBe(b.ledger.toJsonl());
-    expect(Ledger.verify(a.ledger.all())).toEqual({ ok: true });
-    expect(a.summary.windows).toBe(13);
-    expect(a.summary.windows).toBeGreaterThanOrEqual(10);
+  it('produces byte-identical ledgers and summaries for both shipped scenarios and all three runs', async () => {
+    for (const name of ['baseline', 'riskgate'] as const) {
+      for (const kind of ['no_trade', 'unsteered', 'steered'] as const) {
+        const a = await runScenario(name, kind);
+        const b = await runScenario(name, kind);
+        expect(a.ledger.headHash, `${name}/${kind} head`).toBe(b.ledger.headHash);
+        expect(a.ledger.toJsonl(), `${name}/${kind} ledger`).toBe(b.ledger.toJsonl());
+        expect(JSON.stringify(a.summary), `${name}/${kind} summary`).toBe(JSON.stringify(b.summary));
+        expect(Ledger.verify(a.ledger.all()), `${name}/${kind} chain`).toEqual({ ok: true });
+      }
+    }
+    const baselineSteered = await runScenario('baseline', 'steered');
+    expect(baselineSteered.summary.windows).toBe(13);
+    expect(baselineSteered.summary.windows).toBeGreaterThanOrEqual(10);
   });
 
   it('regenerates the committed fixtures byte-for-byte from their seeds', () => {

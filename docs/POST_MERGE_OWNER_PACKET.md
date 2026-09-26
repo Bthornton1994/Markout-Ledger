@@ -59,3 +59,13 @@ Scope: the post-merge remediation branched from 9d89f9f2ba785856e0753c4ed2857a2c
 
 Report PASS or FAIL per item, with file and line or command evidence. Do not merge.
 ```
+
+## Offline deployment note
+
+[DEPLOYMENT_ROLLBACK.md](DEPLOYMENT_ROLLBACK.md) records deployment and rollback requirements. The target fields there are blank. This note does not meet a blocked gate above. The assertion fields below stay blank.
+
+| Gate | Owner fills |
+| --- | --- |
+| C2 | ________ |
+| C3 | ________ |
+| C5 | ________ |
