@@ -220,6 +220,8 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
   };
   let sock: OpenSocket | null = null;
   let pending: { first: number; expect: string; detail: string } | null = null;
+  /** A matched subscribe or unsubscribe answered success:false must be followed directly by its settlement (section 8.1). */
+  let demand: { at: number; type: string; detail: string } | null = null;
   let ended = false;
   let lastReqId = -Infinity;
   /** Whether the capture's first instrument snapshot, which fixes the capture-start specification, has arrived. */
@@ -255,6 +257,10 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
     const prev = records[i - 1]!.type;
     if (prev === 'file_end' && r.type !== 'file_start' && r.type !== 'manifest_end') return refuse('R1b', i, `a ${r.type} record after a file_end, outside every file hash`);
     if (r.type === 'file_start' && prev !== 'file_end') return refuse('R1b', i, 'a file_start that does not follow a file_end');
+    if (demand) {
+      if (!(r.type === demand.type && r.detail === demand.detail)) return refuse('R10', i, `the failed subscription response at record ${demand.at} is not followed directly by ${demand.type} ${demand.detail}`);
+      demand = null;
+    }
     if (pending) {
       if (!(r.type === 'ws_close' && r.detail === pending.expect)) return refuse('R10', i, `the settlement that began at record ${pending.first} is not followed directly by ws_close ${pending.expect}`);
       settle(pending.first, i, pending.detail);
@@ -317,6 +323,7 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
           (method === 'subscribe' && result.snapshot !== undefined && result.snapshot !== (channel !== 'trade'));
         if (mismatch) sock.refused ??= `a response to req_id ${p.req_id} that names another method or subscription than its request`;
         else if (p.success === true && method === 'subscribe' && sock.initial.get(channel) === p.req_id) sock.acked.set(channel, i);
+        else if (p.success === false && (method === 'subscribe' || method === 'unsubscribe')) demand = { at: i, type: method === 'subscribe' && sock.initial.get(channel) === p.req_id ? 'ws_error' : 'ws_close', detail: method === 'subscribe' && sock.initial.get(channel) === p.req_id ? 'subscribe_rejected' : 'resync_failed' };
         continue;
       }
       if (p.channel === 'instrument') {
@@ -403,6 +410,7 @@ export function analyzeCapture(records: RawRecord[], instrument: SelectedInstrum
     if (r.type === 'manifest_start') return refuse('R10', i, 'a second manifest_start');
     return refuse('R10', i, `an unexpected ${r.type} record`);
   }
+  if (demand) return refuse('R10', records.length - 1, `the failed subscription response at record ${demand.at} is not followed directly by ${demand.type} ${demand.detail}`);
   if (pending) return refuse('R10', records.length - 1, 'the stream ends inside a two-record settlement');
   if (sock) return refuse('R10', records.length - 1, 'the last socket has no terminal record');
   if (!specSeen) return refuse('R5', records.length - 1, 'the capture has no instrument snapshot, so the instrument channel gives no specification');

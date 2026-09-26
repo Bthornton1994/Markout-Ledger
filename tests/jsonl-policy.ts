@@ -28,7 +28,9 @@
 //   recorded_v2_publishable   a version-2 recorded fixture whose header matches fixture.v2 $defs/header with
 //                             synthetic: false, whose rights block is redistribution "permitted" with publication
 //                             "sample_permitted" (the schema then requires a non-blank terms URL, check date, checker
-//                             and note), whose every following line matches $defs/event, and whose eventCount matches.
+//                             and note), whose every following line matches $defs/event, whose event sizes have
+//                             decimalsOf(header.qtyScale) places ($defs/fixtureLines; a line cannot see the header, so
+//                             $defs/event still accepts either width), and whose eventCount matches.
 //
 // Every other .jsonl file fails: a raw capture record on any line (or, in a recorded fixture, nested at any depth under
 // any key of the header or an event), invalid JSON, a line that is not a JSON object, a
@@ -102,6 +104,7 @@ const schemaRef = (ref: string): ValidateFunction => {
 };
 const v2Header = schemaRef(`${fixtureSchema.$id as string}#/$defs/header`);
 const v2Event = schemaRef(`${fixtureSchema.$id as string}#/$defs/event`);
+const v2FixtureLines = schemaRef(`${fixtureSchema.$id as string}#/$defs/fixtureLines`);
 const normalizeReport = schemaRef(reportSchema.$id as string);
 
 type Check = (v: unknown) => boolean;
@@ -335,6 +338,7 @@ function classifyRecordedV2(header: Record<string, any>, events: Record<string, 
   for (const [i, event] of events.entries()) {
     if (!v2Event(event)) return fail(`event ${i + 1} does not match fixture.v2 $defs/event: ${firstError(v2Event.errors)}`);
   }
+  if (!v2FixtureLines([header, ...events])) return fail(`event sizes do not have decimalsOf(qtyScale) places: ${firstError(v2FixtureLines.errors)}`);
   // Every object of a recorded fixture accepts undeclared keys (contract section 6), so a whole raw capture record could
   // ride under one; the byte-for-byte check of PR-1's extension does not close the header, which the engine keeps as parsed.
   const nested = [header, ...events].findIndex((v) => Object.values(v).some(nestsRawRecord));

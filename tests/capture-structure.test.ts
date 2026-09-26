@@ -396,6 +396,11 @@ class Tape {
     this.push('subscribe', { request: JSON.stringify({ method: 'subscribe', params, req_id: reqId }) });
     return reqId;
   }
+  /** The book unsubscribe row of section 8.1; returns its req_id. */
+  unsub(symbol = 'BTC/USD', reqId = ++this.reqId): number {
+    this.push('unsubscribe', { request: JSON.stringify({ method: 'unsubscribe', params: { channel: 'book', symbol: [symbol], depth: 100 }, req_id: reqId }) });
+    return reqId;
+  }
   ping(): number {
     const reqId = ++this.reqId;
     this.push('ping', { request: JSON.stringify({ method: 'ping', req_id: reqId }) });
@@ -1588,23 +1593,120 @@ describe('settlements that end the capture, acknowledgements, request identity a
     }
   });
 
-  it('counts a response whose success is not true as no acknowledgement: the socket never passes its gate (R9)', () => {
+  it('settles an initial subscription answered success false immediately as subscribe_rejected, and accepts no later record', () => {
     for (const rejected of ['book', 'trade', 'instrument'] as Channel[]) {
-      const t = new Tape();
-      t.open();
-      const ids = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, t.sub(c)] as const);
-      for (const [c, id] of ids) t.ack(id, c, { success: c !== rejected });
-      t.instrument();
-      t.book('snapshot');
-      t.book();
-      t.close('capture_end');
-      const records = t.end();
-      schemaValid(records);
-      const r = analyzeCapture(records, BTC);
-      expect(r.sockets[0]!.gate, rejected).toBeNull();
-      expect(r.sockets[0]!.window, rejected).toBeNull();
-      expect(r.fixtureEligible, rejected).toBe(false);
+      const late = new Tape();
+      late.open();
+      const ids = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, late.sub(c)] as const);
+      for (const [c, id] of ids) if (c !== rejected) late.ack(id, c);
+      late.instrument();
+      const bad = late.ack(ids.find(([c]) => c === rejected)![1], rejected, { success: false });
+      const between = late.book();
+      late.error('subscribe_rejected');
+      late.close('subscribe_rejected');
+      const broken = late.end();
+      schemaValid(broken);
+      const refused = analyzeCapture(broken, BTC);
+      expect(refused.refused, rejected).toMatchObject({ rule: 'R10', at: between, reason: expect.stringMatching(`failed subscription response at record ${bad}`) });
+      expect(inWindow(refused, between), rejected).toBe(false);
+      expect(refused.fixtureEligible, rejected).toBe(false);
+
+      const ok = new Tape();
+      ok.open();
+      const okIds = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, ok.sub(c)] as const);
+      for (const [c, id] of okIds) if (c !== rejected) ok.ack(id, c);
+      ok.instrument();
+      ok.ack(okIds.find(([c]) => c === rejected)![1], rejected, { success: false });
+      const err = ok.error('subscribe_rejected');
+      ok.close('subscribe_rejected');
+      const settled = ok.end();
+      schemaValid(settled);
+      const accepted = analyzeCapture(settled, BTC);
+      expect(accepted.refused, rejected).toBeNull();
+      expect(accepted.sockets, rejected).toEqual([expect.objectContaining({ settlement: err, detail: 'subscribe_rejected', window: null })]);
+      expect(accepted.fixtureEligible, rejected).toBe(false);
+
+      const again = new Tape();
+      again.open();
+      const againIds = (['book', 'trade', 'instrument'] as Channel[]).map((c) => [c, again.sub(c)] as const);
+      for (const [c, id] of againIds) if (c !== rejected) again.ack(id, c);
+      again.instrument();
+      again.ack(againIds.find(([c]) => c === rejected)![1], rejected, { success: false });
+      again.error('subscribe_rejected');
+      again.close('subscribe_rejected');
+      const reconnect = again.open();
+      const reopened = again.end();
+      schemaValid(reopened);
+      expect(analyzeCapture(reopened, BTC).refused, rejected).toMatchObject({ rule: 'R10', at: reconnect, reason: expect.stringMatching(/after the capture ended/) });
     }
+  });
+
+  it('settles a failed resync acknowledgement immediately as resync_failed, and keeps later records out of that socket', () => {
+    for (const which of ['unsubscribe', 'subscribe'] as const) {
+      const late = new Tape();
+      late.subscribedSocket();
+      const unsub = late.unsub();
+      let bad: number;
+      if (which === 'unsubscribe') {
+        bad = late.push('message', { stream: 'method:unsubscribe', payload: JSON.stringify({ method: 'unsubscribe', req_id: unsub, result: { channel: 'book', symbol: 'BTC/USD', depth: 100 }, success: false }) });
+      } else {
+        late.push('message', { stream: 'method:unsubscribe', payload: JSON.stringify({ method: 'unsubscribe', req_id: unsub, result: { channel: 'book', symbol: 'BTC/USD', depth: 100 }, success: true }) });
+        bad = late.ack(late.sub('book'), 'book', { success: false });
+      }
+      const between = late.book();
+      late.close('capture_end');
+      const broken = late.end();
+      schemaValid(broken);
+      const refused = analyzeCapture(broken, BTC);
+      expect(refused.refused, which).toMatchObject({ rule: 'R10', at: between, reason: expect.stringMatching(`failed subscription response at record ${bad} is not followed directly by ws_close resync_failed`) });
+      expect(inWindow(refused, between), which).toBe(false);
+      expect(refused.fixtureEligible, which).toBe(false);
+    }
+
+    const t = new Tape();
+    const first = t.subscribedSocket();
+    const unsub = t.unsub();
+    const bad = t.push('message', { stream: 'method:unsubscribe', payload: JSON.stringify({ method: 'unsubscribe', req_id: unsub, result: { channel: 'book', symbol: 'BTC/USD', depth: 100 }, success: false }) });
+    const close = t.close('resync_failed');
+    const second = t.subscribedSocket();
+    t.close('capture_end');
+    const records = t.end();
+    schemaValid(records);
+    const r = analyzeCapture(records, BTC);
+    expect(r.refused).toBeNull();
+    expect(r.sockets.map((s) => s.detail)).toEqual(['resync_failed', 'capture_end']);
+    expect(r.sockets[0]).toMatchObject({ settlement: close, window: [first.gate + 1, close - 1] });
+    expect(r.sockets[0]!.window![1]).toBeLessThan(second.open);
+    expect(inWindow(r, first.update)).toBe(true);
+    expect(inWindow(r, bad)).toBe(true);
+    expect(inWindow(r, close)).toBe(false);
+    expect(inWindow(r, second.update)).toBe(true);
+    expect(r.fixtureEligible).toBe(true);
+  });
+
+  it('does not settle a mismatched response, or a failed ping, as a subscription rejection', () => {
+    const mismatch = new Tape();
+    mismatch.open();
+    const book = mismatch.sub('book');
+    mismatch.sub('trade');
+    mismatch.sub('instrument');
+    mismatch.ack(book, 'book', { depth: 10, success: false });
+    mismatch.instrument();
+    mismatch.close('capture_end');
+    const mismatched = mismatch.end();
+    schemaValid(mismatched);
+    const m = analyzeCapture(mismatched, BTC);
+    expect(m.refused).toBeNull();
+    expect(m.sockets[0]!.refused).toMatch(/names another method or subscription/);
+
+    const ping = new Tape();
+    ping.subscribedSocket();
+    const req = ping.ping();
+    ping.push('message', { stream: 'method:pong', payload: JSON.stringify({ method: 'pong', req_id: req, success: false }) });
+    ping.close('capture_end');
+    const pong = ping.end();
+    schemaValid(pong);
+    expect(analyzeCapture(pong, BTC)).toMatchObject({ refused: null, fixtureEligible: true });
   });
 
   it('refuses a request that reuses an earlier req_id of the capture, on the same socket or a later one (R10)', () => {

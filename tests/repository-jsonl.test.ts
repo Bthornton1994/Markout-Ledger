@@ -1312,6 +1312,29 @@ describe('A10 classifier', () => {
     expect(classifyJsonl(recordedFixture(publishable))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
   });
 
+  it('refuses a recorded fixture whose event sizes are not decimalsOf(header.qtyScale) places', () => {
+    const width = (size: string, places: number): string => {
+      const [whole, frac = ''] = size.split('.');
+      return `${whole}.${frac.padEnd(places, '0').slice(0, places)}`;
+    };
+    const atScale = (headerName: 'header_recorded_qty8' | 'header_recorded_qty6', places: number): string => {
+      const header = structuredClone(fixtureExamples[headerName]!);
+      const events = v2Events.map((event) => {
+        const copy = structuredClone(event);
+        if (typeof copy.size === 'string') copy.size = width(copy.size, places);
+        for (const side of ['bids', 'asks']) if (Array.isArray(copy[side])) for (const level of copy[side]) level.size = width(level.size, places);
+        return copy;
+      });
+      header.eventCount = events.length;
+      publishable(header.provenance.rights);
+      return jsonl([header, ...events]);
+    };
+    expect(classifyJsonl(atScale('header_recorded_qty8', 8))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+    expect(classifyJsonl(atScale('header_recorded_qty6', 6))).toEqual({ ok: true, kind: 'recorded_v2_publishable' });
+    expect(classifyJsonl(atScale('header_recorded_qty8', 6))).toMatchObject({ ok: false, reason: expect.stringMatching(/decimalsOf\(qtyScale\)/) });
+    expect(classifyJsonl(atScale('header_recorded_qty6', 8))).toMatchObject({ ok: false, reason: expect.stringMatching(/decimalsOf\(qtyScale\)/) });
+  });
+
   it('refuses as publishable a recorded fixture whose rights block lacks termsUrl, termsCheckedOn or checkedBy, or a permitted one without its note', () => {
     for (const key of ['termsUrl', 'termsCheckedOn', 'checkedBy', 'note']) {
       const verdict = classifyJsonl(recordedFixture((r) => { publishable(r); delete r[key]; }));

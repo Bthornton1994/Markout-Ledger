@@ -35,6 +35,8 @@ CI for that push:
 
 That `success` is the offline `check` job on the merge commit. It is not an attestation of C2, C3, or C5.
 
+Sections 1 and 3 record that pull request #3 merge. They do not describe later commits on `main`. Pull request #4 is commit `9d89f9f2ba785856e0753c4ed2857a2c26b2394f`, whose sole parent is `890637815bb7370f75695dc20906eb12e9e289f6`. A later step 3a documents change, this post-merge remediation included, is not recorded here as a CI result. This file does not invent a CI conclusion for any SHA after that merge.
+
 ## 2. Current path
 
 The only workflow in the repository is `.github/workflows/ci.yml`. It has no deploy job. No other workflow file is present, and the repository names no deploy target.
@@ -53,7 +55,7 @@ The same Node commands are the local replay path. `npm run demo` writes `out/<sc
 
 ## 3. Rollback
 
-No production rollback procedure is documented. The sole git parent of the `main` tip is `4beacde9f8ecf2072936a7ab3ee790db2f3e614a` (Merge PR #2: Milestone 1 deterministic replay and decision ledger). That parent is history. This file does not define a rollback.
+No production rollback procedure is documented. Section 1 records the pull request #3 merge commit `890637815bb7370f75695dc20906eb12e9e289f6`, whose sole git parent is `4beacde9f8ecf2072936a7ab3ee790db2f3e614a` (Merge PR #2: Milestone 1 deterministic replay and decision ledger). That parent is history of that merge. It is not a claim about the parent of a later `main` commit. Pull request #4 is `9d89f9f2ba785856e0753c4ed2857a2c26b2394f`, whose sole parent is the pull request #3 merge. This file does not define a rollback.
 
 ## 4. Owner decisions still required
 
@@ -61,14 +63,18 @@ These decisions are still open. This file does not make them.
 
 - **Deploy and target.** Required before a deploy target is chosen and before any deploy. No deploy workflow and no deploy target exist in the repository today.
 - **P0 listing.** C2 and C3 are still required before a P0 listing, as the decision document already states. This file does not supply those attestations.
-- **Capture.** C5 is still required before capture, together with C2 and C3, as the decision document already states. This file does not supply that reading.
+- **Capture.** Nothing is captured until the cleared implementation SHA (PR-0 at Z unless the owner skips PR-0, PR-1 at Y, and every later documents change and PR-1 follow-up the capture depends on) and C2, C3, C5, P0, C1 and C4 are satisfied. This file does not supply those clearances.
 
 ## 5. Stop conditions
+
+While C2 or C3 is unmet:
+
+- Do not run a P0 listing.
+- Do not make venue or data-use claims.
 
 While C2, C3, or C5 is unmet:
 
 - Do not capture.
-- Do not run a P0 listing.
 - Do not make venue or data-use claims.
 
-This is the release-prep halt. It does not amend [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). That document already says the P0 listing does not run until C2 and C3 are met, that the P0 listing does not depend on C5, and that nothing is captured until C2, C3, and C5 are met. The provisional venue text already in the Milestone 2 documents is not repeated here as a clearance.
+P0 does not wait for C5. Capture waits for C5 and also for the cleared implementation SHA (PR-0 at Z unless the owner skips PR-0, PR-1 at Y, and every later documents change and PR-1 follow-up the capture depends on), and for P0, C1 and C4. This file does not supply those clearances and does not amend [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). That document already says the P0 listing does not run until C2 and C3 are met, that the P0 listing does not depend on C5, and that nothing is captured until C2, C3, and C5 are met. The provisional venue text already in the Milestone 2 documents is not repeated here as a clearance.
