@@ -57,6 +57,7 @@ const fixture = validator(fixtureId);
 const fixtureHeader = validator(`${fixtureId}#/$defs/header`);
 const fixtureBook = validator(`${fixtureId}#/$defs/event/oneOf/0`);
 const fixtureTrade = validator(`${fixtureId}#/$defs/event/oneOf/1`);
+const fixtureLines = validator(`${fixtureId}#/$defs/fixtureLines`);
 const normalizeReport = validator(reportId);
 
 const captureExamples = (readJson('schemas/examples/capture-record.v1.examples.json') as ExampleFile).examples;
@@ -821,6 +822,35 @@ describe('fixture.v2 schema', () => {
     const doc = derive(fixtureExamples, c);
     expectFailure(c.target, doc, c.expected);
     expect(fixture(doc)).toBe(false);
+  });
+
+  const sized = (event: Json, places: number): Json => {
+    const copy = structuredClone(event);
+    const width = (size: string): string => {
+      const [whole, frac = ''] = size.split('.');
+      return `${whole}.${frac.padEnd(places, '0').slice(0, places)}`;
+    };
+    if (typeof copy.size === 'string') copy.size = width(copy.size);
+    for (const side of ['bids', 'asks']) if (Array.isArray(copy[side])) for (const level of copy[side] as Json[]) level.size = width(level.size);
+    return copy;
+  };
+  const recordedLines = (headerName: 'header_recorded_qty8' | 'header_recorded_qty6', places: number): Json[] => {
+    const header = structuredClone(fixtureExamples[headerName]!);
+    const events = [sized(fixtureExamples.event_book!, places), sized(fixtureExamples.event_trade!, places)];
+    header.eventCount = events.length;
+    return [header, ...events];
+  };
+
+  it('rejects an event size whose width is not decimalsOf(header.qtyScale), in both directions', () => {
+    expect(fixtureLines(recordedLines('header_recorded_qty8', 8))).toBe(true);
+    expect(fixtureLines(recordedLines('header_recorded_qty6', 6))).toBe(true);
+    expect(fixtureLines(recordedLines('header_recorded_qty8', 6))).toBe(false);
+    expect(reasons(fixtureLines.errors).some((e) => e.keyword === 'pattern' && e.instancePath.endsWith('/size'))).toBe(true);
+    expect(fixtureLines(recordedLines('header_recorded_qty6', 8))).toBe(false);
+    expect(reasons(fixtureLines.errors).some((e) => e.keyword === 'pattern' && e.instancePath.endsWith('/size'))).toBe(true);
+    // A line by itself still accepts either width: it cannot see the header.
+    expect(fixtureBook(sized(fixtureExamples.event_book!, 6))).toBe(true);
+    expect(fixtureTrade(sized(fixtureExamples.event_trade!, 8))).toBe(true);
   });
 });
 
