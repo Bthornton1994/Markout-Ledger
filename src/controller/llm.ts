@@ -36,8 +36,8 @@ export interface LlmProposalJson {
 
 /**
  * JSON Schema of the reply `decide` asks for (`LlmProposalJson`): types, required keys and the `quoteSides` values.
- * Numeric bounds and the reason length are left to the prompt and to the engine's validation, because
- * schema-constrained output commonly does not support `minimum`, `maximum` or `maxLength`.
+ * Numeric bounds are left to the prompt and to the engine's validation, and the reason length to the truncation in
+ * `decide`, because schema-constrained output commonly does not support `minimum`, `maximum` or `maxLength`.
  */
 export const LLM_OUTPUT_SCHEMA = {
   type: 'object',
@@ -77,8 +77,8 @@ export function renderReviewPrompt(review: WindowReview, ctx: ControllerContext)
 }
 
 /**
- * Extracts the outermost `{...}` from the reply. A client that passes `outputSchema` to its provider gets the bare
- * object back; the extraction stays for clients that do not (the fake client in the tests among them).
+ * Extracts the outermost `{...}` from the reply. A client that passes `outputSchema` to its provider normally gets the
+ * bare object back; the extraction stays for clients that do not (the fake client in the tests among them).
  */
 export function parseLlmProposal(text: string): LlmProposalJson {
   const start = text.indexOf('{');
