@@ -8,6 +8,7 @@ const read = (path: string): string => readFileSync(new URL(`../${path}`, import
 const PR3 = '890637815bb7370f75695dc20906eb12e9e289f6';
 const PR4 = '9d89f9f2ba785856e0753c4ed2857a2c26b2394f';
 const PR5 = '758defc624412666d4dea33bf76a705b6a0f7c52';
+const PR6 = '3477f1da4b36c4291ae4e3bdeac7810a1312c2bb';
 
 describe('deployment and rollback requirements stay decision-ready and blank', () => {
   const ops = read('docs/DEPLOYMENT_ROLLBACK.md');
@@ -52,15 +53,28 @@ describe('deployment and rollback requirements stay decision-ready and blank', (
 describe('release prep records the known main commits and still stops P0 and capture', () => {
   const prep = read('docs/RELEASE_PREP.md');
 
-  it('records pull requests #3, #4, and #5 and the verified Actions runs', () => {
+  it('records pull requests #3, #4, #5, and #6 and the verified Actions runs', () => {
     expect(prep).toContain(PR3);
     expect(prep).toContain(PR4);
     expect(prep).toContain(PR5);
+    expect(prep).toContain(PR6);
     expect(prep).toContain('https://github.com/Bthornton1994/Markout-Ledger/actions/runs/36214977668');
     expect(prep).toContain('https://github.com/Bthornton1994/Markout-Ledger/actions/runs/36215785277');
     expect(prep).toContain('https://github.com/Bthornton1994/Markout-Ledger/actions/runs/36266694661');
+    expect(prep).toContain('https://github.com/Bthornton1994/Markout-Ledger/actions/runs/36268777940');
     expect(prep).toMatch(/\[DEPLOYMENT_ROLLBACK\.md\]\(DEPLOYMENT_ROLLBACK\.md\)/);
     expect(prep).not.toMatch(/The sole git parent of the `main` tip is/);
+  });
+
+  it('records the pull request #6 merge as the only recorded tip', () => {
+    expect(prep).toContain(`This file records \`main\` through the pull request #6 merge \`${PR6}\`.`);
+    expect(prep).toContain('A commit after the pull request #6 merge is not described here.');
+    expect(prep.match(/\(recorded tip\)/g)).toEqual(['(recorded tip)']);
+    expect(prep.match(/tip recorded here/g)).toEqual(['tip recorded here']);
+    expect(prep).toContain('### Pull request #6 merge (recorded tip)');
+    expect(prep).toContain(`| \`main\` tip recorded here | \`${PR6}\` |`);
+    expect(prep).toContain(`| \`main\` commit | \`${PR5}\` |`);
+    expect(prep).toContain(`- Pull request #6 merge \`${PR6}\`, sole parent the pull request #5 merge.`);
   });
 
   it('still stops a P0 listing on C2 or C3 and capture on C2, C3, or C5', () => {
@@ -79,5 +93,20 @@ describe('owner packet assertion fields stay blank', () => {
   it('keeps C2, C3, and C5 blank', () => {
     const rows = packet.split('\n').filter((line) => /^\| C[235] \|/.test(line));
     expect(rows).toEqual(['| C2 | ________ |', '| C3 | ________ |', '| C5 | ________ |']);
+  });
+
+  it('notes the pull request #6 merge on main as history, not a clearance', () => {
+    expect(packet).toMatch(/pull request #6 \(documents and offline operations only\) are merged on `main`/);
+    expect(packet).toContain('[RELEASE_PREP.md](RELEASE_PREP.md) records the pull request #6 merge as the tip.');
+    expect(packet.match(/as the tip/g)).toEqual(['as the tip']);
+    expect(packet).toMatch(/That is history, not a clearance, and it does not meet C2, C3, or C5\./);
+  });
+});
+
+describe('README names the recorded tip', () => {
+  const readme = read('README.md');
+
+  it('says release prep records main through the pull request #6 merge', () => {
+    expect(readme).toContain('recorded commits on `main` through the pull request #6 merge');
   });
 });

@@ -64,6 +64,8 @@ Report PASS or FAIL per item, with file and line or command evidence. Do not mer
 
 [DEPLOYMENT_ROLLBACK.md](DEPLOYMENT_ROLLBACK.md) records deployment and rollback requirements. The target fields there are blank. This note does not meet a blocked gate above. The assertion fields below stay blank.
 
+Pull request #5 and pull request #6 (documents and offline operations only) are merged on `main`; [RELEASE_PREP.md](RELEASE_PREP.md) records the pull request #6 merge as the tip. That is history, not a clearance, and it does not meet C2, C3, or C5.
+
 | Gate | Owner fills |
 | --- | --- |
 | C2 | ________ |
