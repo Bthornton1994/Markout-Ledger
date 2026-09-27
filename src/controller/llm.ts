@@ -13,7 +13,16 @@ import type { ControllerContext, ControllerProposal, SteeringController, WindowR
 export interface LlmRequest {
   system: string;
   prompt: string;
+  /**
+   * Ceiling on everything the model generates for this call. On a model that thinks, thinking tokens count toward
+   * it even when their text is not returned, so a ceiling sized for the JSON answer alone cuts the reply off.
+   */
   maxTokens: number;
+  /**
+   * JSON Schema the reply must satisfy. A client whose provider supports schema-constrained output passes it on;
+   * a client that cannot may ignore it, and the controller still extracts the JSON object from free text.
+   */
+  outputSchema?: Readonly<Record<string, unknown>>;
 }
 
 export interface LlmClient {
@@ -25,12 +34,38 @@ export interface LlmProposalJson {
   reason: string;
 }
 
+/**
+ * JSON Schema of the reply `decide` asks for (`LlmProposalJson`): types, required keys and the `quoteSides` values.
+ * Numeric bounds and the reason length are left to the prompt and to the engine's validation, because
+ * schema-constrained output commonly does not support `minimum`, `maximum` or `maxLength`.
+ */
+export const LLM_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    params: {
+      type: 'object',
+      properties: {
+        spreadMultiplierMilli: { type: 'integer' },
+        sizeMultiplierMilli: { type: 'integer' },
+        maxInventoryFractionMilli: { type: 'integer' },
+        inventorySkewBps: { type: 'integer' },
+        quoteSides: { type: 'string', enum: [...INSTRUCTION_BOUNDS.quoteSides] },
+      },
+      required: ['spreadMultiplierMilli', 'sizeMultiplierMilli', 'maxInventoryFractionMilli', 'inventorySkewBps', 'quoteSides'],
+      additionalProperties: false,
+    },
+    reason: { type: 'string' },
+  },
+  required: ['params', 'reason'],
+  additionalProperties: false,
+} as const;
+
 export const LLM_SYSTEM_PROMPT = [
   'You are the slow steering controller for a passive quoting policy in a paper-trading research replay.',
-  'You receive a review of the window that just ended and must answer with ONE JSON object and nothing else:',
+  'You receive a review of the window that just ended. Reply with one JSON object in this shape; the replay reads it as the instruction for the next window, and `reason` is where your explanation goes:',
   '{"params": {"spreadMultiplierMilli": int, "sizeMultiplierMilli": int, "maxInventoryFractionMilli": int, "inventorySkewBps": int, "quoteSides": "both"|"bid_only"|"ask_only"|"none"}, "reason": string}',
   `Bounds: ${JSON.stringify(INSTRUCTION_BOUNDS)}`,
-  'Out-of-bounds values are rejected and the prior instruction stays in force. Prefer small changes.',
+  'Out-of-bounds values are rejected and the prior instruction stays in force.',
 ].join('\n');
 
 export function renderReviewPrompt(review: WindowReview, ctx: ControllerContext): string {
@@ -41,6 +76,10 @@ export function renderReviewPrompt(review: WindowReview, ctx: ControllerContext)
   ].join('\n');
 }
 
+/**
+ * Extracts the outermost `{...}` from the reply. A client that passes `outputSchema` to its provider gets the bare
+ * object back; the extraction stays for clients that do not (the fake client in the tests among them).
+ */
 export function parseLlmProposal(text: string): LlmProposalJson {
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
@@ -61,7 +100,8 @@ export class LlmSteeringController implements SteeringController {
   ) {
     this.id = opts.id ?? 'llm-controller';
     this.modeledLatencyMs = opts.modeledLatencyMs ?? 1500;
-    this.maxTokens = opts.maxTokens ?? 400;
+    // Thinking counts toward the ceiling, so the default leaves room for it ahead of the short JSON answer.
+    this.maxTokens = opts.maxTokens ?? 16000;
   }
 
   private readonly maxTokens: number;
@@ -71,6 +111,7 @@ export class LlmSteeringController implements SteeringController {
       system: LLM_SYSTEM_PROMPT,
       prompt: renderReviewPrompt(review, ctx),
       maxTokens: this.maxTokens,
+      outputSchema: LLM_OUTPUT_SCHEMA,
     });
     const proposal = parseLlmProposal(text);
     // The model proposes params + reason only; the wrapper stamps the versioning fields.
