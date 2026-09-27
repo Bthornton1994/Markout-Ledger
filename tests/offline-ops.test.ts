@@ -68,9 +68,12 @@ describe('release prep records the known main commits and still stops P0 and cap
 
   it('records the pull request #6 merge as the only recorded tip', () => {
     expect(prep).toContain(`This file records \`main\` through the pull request #6 merge \`${PR6}\`.`);
+    expect(prep).toContain('A commit after the pull request #6 merge is not described here.');
     expect(prep.match(/\(recorded tip\)/g)).toEqual(['(recorded tip)']);
+    expect(prep.match(/tip recorded here/g)).toEqual(['tip recorded here']);
     expect(prep).toContain('### Pull request #6 merge (recorded tip)');
     expect(prep).toContain(`| \`main\` tip recorded here | \`${PR6}\` |`);
+    expect(prep).toContain(`| \`main\` commit | \`${PR5}\` |`);
     expect(prep).toContain(`- Pull request #6 merge \`${PR6}\`, sole parent the pull request #5 merge.`);
   });
 
@@ -90,5 +93,10 @@ describe('owner packet assertion fields stay blank', () => {
   it('keeps C2, C3, and C5 blank', () => {
     const rows = packet.split('\n').filter((line) => /^\| C[235] \|/.test(line));
     expect(rows).toEqual(['| C2 | ________ |', '| C3 | ________ |', '| C5 | ________ |']);
+  });
+
+  it('notes the pull request #6 merge on main as history, not a clearance', () => {
+    expect(packet).toMatch(/pull request #6 \(documents and offline operations only\) are merged on `main`/);
+    expect(packet).toMatch(/That is history, not a clearance, and it does not meet C2, C3, or C5\./);
   });
 });
