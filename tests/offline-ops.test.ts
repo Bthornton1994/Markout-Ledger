@@ -97,6 +97,16 @@ describe('owner packet assertion fields stay blank', () => {
 
   it('notes the pull request #6 merge on main as history, not a clearance', () => {
     expect(packet).toMatch(/pull request #6 \(documents and offline operations only\) are merged on `main`/);
+    expect(packet).toContain('[RELEASE_PREP.md](RELEASE_PREP.md) records the pull request #6 merge as the tip.');
+    expect(packet.match(/as the tip/g)).toEqual(['as the tip']);
     expect(packet).toMatch(/That is history, not a clearance, and it does not meet C2, C3, or C5\./);
+  });
+});
+
+describe('README names the recorded tip', () => {
+  const readme = read('README.md');
+
+  it('says release prep records main through the pull request #6 merge', () => {
+    expect(readme).toContain('recorded commits on `main` through the pull request #6 merge');
   });
 });
