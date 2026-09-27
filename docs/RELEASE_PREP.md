@@ -1,6 +1,6 @@
 # Release prep
 
-This file records `main` through the pull request #5 merge `758defc624412666d4dea33bf76a705b6a0f7c52`. It describes the offline path that exists today. It does not choose a deploy target, does not deploy, and does not state that the core function is production-ready.
+This file records `main` through the pull request #6 merge `3477f1da4b36c4291ae4e3bdeac7810a1312c2bb`. It describes the offline path that exists today. It does not choose a deploy target, does not deploy, and does not state that the core function is production-ready.
 
 Production deployment requirements and rollback requirements, with every target field left blank, are in [DEPLOYMENT_ROLLBACK.md](DEPLOYMENT_ROLLBACK.md). That file names no deploy host and does not define an executable production rollback.
 
@@ -8,7 +8,7 @@ C2, C3, and C5 remain unmet. This file is not an attestation of any of them. Def
 
 ## 1. Recorded commits
 
-Read from git, and from the GitHub Actions run for each push named below. A SHA that these tables do not name has no CI conclusion in this file. A commit after the pull request #5 merge is not described here.
+Read from git, and from the GitHub Actions run for each push named below. A SHA that these tables do not name has no CI conclusion in this file. A commit after the pull request #6 merge is not described here.
 
 ### Pull request #3 merge
 
@@ -64,11 +64,11 @@ CI for that push:
 
 That `success` is the offline `check` job on that commit. It is not an attestation of C2, C3, or C5.
 
-### Pull request #5 merge (recorded tip)
+### Pull request #5 merge
 
 | Item | Value |
 | --- | --- |
-| `main` tip recorded here | `758defc624412666d4dea33bf76a705b6a0f7c52` |
+| `main` commit | `758defc624412666d4dea33bf76a705b6a0f7c52` |
 | Subject | Post-merge: qtyScale event sizes and failed-subscription settlement (#5) |
 | Commit time | 2026-09-26 12:37:25 -0700 |
 | Sole parent | `9d89f9f2ba785856e0753c4ed2857a2c26b2394f` |
@@ -86,6 +86,31 @@ CI for that push:
 | Job | `check` |
 | Conclusion | `success` |
 | Completed | 2026-09-26T19:38:08Z, which is 2026-09-26 12:38:08 Pacific Time (PDT, UTC-7) |
+
+That `success` is the offline `check` job on that commit. It is not an attestation of C2, C3, or C5.
+
+### Pull request #6 merge (recorded tip)
+
+| Item | Value |
+| --- | --- |
+| `main` tip recorded here | `3477f1da4b36c4291ae4e3bdeac7810a1312c2bb` |
+| Subject | Document blank production deploy and rollback requirements (#6) |
+| Commit time | 2026-09-26 13:13:38 -0700 |
+| Sole parent | `758defc624412666d4dea33bf76a705b6a0f7c52` |
+| Tree | `ba214e54c2a1ae8c403a618cd6d18a448b62a78d` |
+| Pull request #6 | https://github.com/Bthornton1994/Markout-Ledger/pull/6 |
+
+CI for that push:
+
+| Item | Value |
+| --- | --- |
+| Workflow | `ci` (`.github/workflows/ci.yml`) |
+| Event | `push` to `main` |
+| Run | https://github.com/Bthornton1994/Markout-Ledger/actions/runs/36268777940 |
+| Head SHA | `3477f1da4b36c4291ae4e3bdeac7810a1312c2bb` |
+| Job | `check` |
+| Conclusion | `success` |
+| Completed | 2026-09-26T20:14:33Z, which is 2026-09-26 13:14:33 Pacific Time (PDT, UTC-7) |
 
 That `success` is the offline `check` job on that commit. It is not an attestation of C2, C3, or C5.
 
@@ -114,6 +139,7 @@ Git parents of the commits in section 1, each with one parent:
 - Pull request #3 merge `890637815bb7370f75695dc20906eb12e9e289f6`, sole parent `4beacde9f8ecf2072936a7ab3ee790db2f3e614a` (Merge PR #2: Milestone 1 deterministic replay and decision ledger).
 - Pull request #4 `9d89f9f2ba785856e0753c4ed2857a2c26b2394f`, sole parent the pull request #3 merge.
 - Pull request #5 merge `758defc624412666d4dea33bf76a705b6a0f7c52`, sole parent the pull request #4 commit.
+- Pull request #6 merge `3477f1da4b36c4291ae4e3bdeac7810a1312c2bb`, sole parent the pull request #5 merge.
 
 Those parents are history of those commits. They are not a production rollback target.
 
