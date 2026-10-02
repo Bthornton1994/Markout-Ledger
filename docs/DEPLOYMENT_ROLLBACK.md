@@ -4,7 +4,7 @@ This document lists what the owner must decide before any production deploy and 
 
 Written against `main` at `758defc624412666d4dea33bf76a705b6a0f7c52` (pull request #5). That SHA is not a chosen production deploy.
 
-C2, C3, and C5 remain unmet. This file is not an attestation of any of them. Definitions stay in [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). Assertion fields:
+For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED). This file is not an attestation of any of them. Capture and P0 are not part of v1. Definitions stay in [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). Assertion fields:
 
 | Gate | Owner fills |
 | --- | --- |

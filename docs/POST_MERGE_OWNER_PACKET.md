@@ -8,6 +8,8 @@ This remediation is a documents change under handoff Gate and sequence step 3a. 
 
 These stay unmet. This remediation does not meet any of them.
 
+For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED); pursuing a Kraken adapter later reopens them.
+
 - **C2.** Four uses, each cleared separately and attested by the owner's nonprivileged attestation on pull request #3: automated first-party access to the public WebSocket API v2 and to the public REST endpoints the capture and P0 use (`AssetPairs`, `Time`); private retention of the raw captures on the owner's host; the research use of this project; and publication, in this public repository and its pull requests, of outputs derived from captured data other than the recorded data itself (for C2, cleared at least for the P0 statement and the A12 outputs). For the P0 listing, C2 also includes the owner's answer on whether retaining the P0 payload is covered. Model training on any capture, and publishing recorded data itself, stay further uses. This packet does not write that attestation.
 - **C3.** The owner's written confirmation on pull request #3, from the live page and with the date of that reading, that the host that runs the P0 listing and every capture is located in, and the person who operates it resides in, a US state Kraken serves for spot. It is read on the day of the listing and again before each capture day. This packet does not name a host or an operator.
 - **C5.** The owner's dated live-page reading of decision section 4, including the three items behind `tradeIdOrdered`, `per_fill`, and the 15 s liveness timeout. This packet does not record that reading.

@@ -1,12 +1,12 @@
 # Owner P0 readiness (owner only)
 
-**NOT AUTHORIZED TO RUN.** The P0 listing is NOT AUTHORIZED until C2 and C3 are attested by the owner on pull request #3, each confirmed or re-confirmed with the date of that reading before the listing, C3 from a reading made on the day of the listing. For P0, C2 includes the owner's answer on whether retaining the P0 payload is covered. C2 and C3 are UNMET today ([OWNER_GATE_STATUS.md](OWNER_GATE_STATUS.md)).
+**NOT AUTHORIZED TO RUN.** The P0 listing is NOT AUTHORIZED and is out of scope for v1: v1 is offline evaluation and does not list pairs or capture. For v1, C2 and C3 are OUT OF SCOPE (not PASSED) ([OWNER_GATE_STATUS.md](OWNER_GATE_STATUS.md)). If a Kraken adapter is pursued later, C2 and C3 reopen, and the P0 listing stays NOT AUTHORIZED until C2 and C3 are attested by the owner on pull request #3, each confirmed or re-confirmed with the date of that reading before the listing, C3 from a reading made on the day of the listing. For P0, C2 includes the owner's answer on whether retaining the P0 payload is covered.
 
 Only the owner runs P0. The chief of staff, the implementer, and every agent, subagent or automated session never run P0, never contact the venue, and never receive the venue payload.
 
 This checklist was prepared offline. It runs nothing, contacts nothing, and fills no gate. The procedure is handoff section 0, "P0, before any code" ([M2_GROK_HANDOFF.md](M2_GROK_HANDOFF.md)), which governs where this file differs.
 
-## Preconditions (owner fills on the day of the listing)
+## Preconditions (reopened Kraken path only; owner fills on the day of the listing)
 
 | Precondition | Owner fills |
 | --- | --- |
@@ -18,7 +18,7 @@ This checklist was prepared offline. It runs nothing, contacts nothing, and fill
 
 If any row above is blank, stop. Do not run P0.
 
-## Steps after the gates (owner only)
+## Steps after the gates (reopened Kraken path only; owner only)
 
 1. Use the host confirmed under C3, operated by the person confirmed under C3. No VPN, proxy, remote host, or third party in another jurisdiction.
 2. Take one public instrument snapshot, either `{"method":"subscribe","params":{"channel":"instrument","snapshot":true}}` on `wss://ws.kraken.com/v2`, or `GET https://api.kraken.com/0/public/AssetPairs`. Reference data only; no market data is captured.
@@ -36,4 +36,4 @@ If any row above is blank, stop. Do not run P0.
 
 ## C5 and capture
 
-C5 is not required for P0. C5 is required before any capture: nothing is captured until C2, C3, and C5 are met, and capture also waits for the cleared implementation SHA, P0, C1, and C4. P0 is not a capture and does not authorize one.
+C5 is not required for P0. C5 is required before any capture: nothing is captured until C2, C3, and C5 are met, and capture also waits for the cleared implementation SHA, P0, C1, and C4. P0 is not a capture and does not authorize one. v1 captures nothing, and for v1 C5 is OUT OF SCOPE (not PASSED) as well.

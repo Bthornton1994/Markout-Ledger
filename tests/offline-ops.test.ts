@@ -1,5 +1,6 @@
-// Locks the offline deployment/rollback requirements doc to blanks and to recorded git facts.
-// A filled target, a filled C2/C3/C5 attestation, or a dropped recorded SHA fails here.
+// Locks the offline deployment/rollback requirements doc to blanks and to recorded git facts, and the rollback, release
+// prep and packet documents to the v1 scope (C2, C3, and C5 OUT OF SCOPE for v1, not passed; capture and P0 not part of v1).
+// A filled target, a filled C2/C3/C5 attestation, a dropped v1 sentence, or a dropped recorded SHA fails here.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -32,15 +33,17 @@ describe('deployment and rollback requirements stay decision-ready and blank', (
     expect(ops).toMatch(/That SHA is not a chosen production deploy\./);
   });
 
-  it('leaves C2, C3, and C5 assertion fields blank', () => {
-    expect(ops).toMatch(/C2, C3, and C5 remain unmet/);
+  it('records C2, C3, and C5 OUT OF SCOPE for v1, not passed, and leaves their assertion fields blank', () => {
+    expect(ops).toContain('For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED).');
     expect(ops).toMatch(/\| C2 \| ________ \|/);
     expect(ops).toMatch(/\| C3 \| ________ \|/);
     expect(ops).toMatch(/\| C5 \| ________ \|/);
     expect(ops).not.toMatch(/\bC[235] is met\b/);
+    expect(ops).not.toMatch(/\bC[235] (?:is |has |has been |was )?passed\b/i);
   });
 
-  it('keeps capture behind C2, C3, and C5 and describes only the offline synthetic replay repeat', () => {
+  it('keeps capture behind C2, C3, and C5, leaves capture and P0 out of v1, and describes only the offline synthetic replay repeat', () => {
+    expect(ops).toMatch(/Capture and P0 are not part of v1\./);
     expect(ops).toMatch(/Nothing is captured until C2, C3, and C5 are met/);
     expect(ops).toMatch(/npm run demo/);
     expect(ops).toMatch(/tests\/engine\.test\.ts/);
@@ -77,13 +80,14 @@ describe('release prep records the known main commits and still stops P0 and cap
     expect(prep).toContain(`- Pull request #6 merge \`${PR6}\`, sole parent the pull request #5 merge.`);
   });
 
-  it('still stops a P0 listing on C2 or C3 and capture on C2, C3, or C5', () => {
+  it('still stops a P0 listing on C2 or C3 and capture on C2, C3, or C5, and leaves both out of v1', () => {
     expect(prep).toMatch(/While C2 or C3 is unmet:/);
     expect(prep).toMatch(/- Do not run a P0 listing/);
     expect(prep).toMatch(/While C2, C3, or C5 is unmet:/);
     expect(prep).toMatch(/- Do not capture/);
     expect(prep).toMatch(/P0 does not wait for C5\. Capture waits for C5/);
-    expect(prep).toMatch(/C2, C3, and C5 remain unmet/);
+    expect(prep).toContain('For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED).');
+    expect(prep).toMatch(/Capture and P0 are not part of v1\./);
   });
 });
 
@@ -93,6 +97,11 @@ describe('owner packet assertion fields stay blank', () => {
   it('keeps C2, C3, and C5 blank', () => {
     const rows = packet.split('\n').filter((line) => /^\| C[235] \|/.test(line));
     expect(rows).toEqual(['| C2 | ________ |', '| C3 | ________ |', '| C5 | ________ |']);
+  });
+
+  it('records C2, C3, and C5 OUT OF SCOPE for v1 and reopened by a Kraken adapter, and claims none of them passed', () => {
+    expect(packet).toContain('For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED); pursuing a Kraken adapter later reopens them.');
+    expect(packet).not.toMatch(/\bC[235] (?:is |has |has been |was )?passed\b/i);
   });
 
   it('notes the pull request #6 merge on main as history, not a clearance', () => {

@@ -4,7 +4,7 @@ This file records `main` through the pull request #6 merge `3477f1da4b36c4291ae4
 
 Production deployment requirements and rollback requirements, with every target field left blank, are in [DEPLOYMENT_ROLLBACK.md](DEPLOYMENT_ROLLBACK.md). That file names no deploy host and does not define an executable production rollback.
 
-C2, C3, and C5 remain unmet. This file is not an attestation of any of them. Definitions stay in [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). This file does not restate those definitions and does not record that any of them has been met.
+For v1, C2, C3, and C5 are OUT OF SCOPE (not PASSED). This file is not an attestation of any of them. Capture and P0 are not part of v1. Definitions stay in [M2_DATA_SOURCE_DECISION.md](M2_DATA_SOURCE_DECISION.md). This file does not restate those definitions and does not record that any of them has been met.
 
 ## 1. Recorded commits
 
