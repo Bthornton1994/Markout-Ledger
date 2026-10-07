@@ -52,11 +52,13 @@ positionCost  = positionCost - removedCost + s * No
 inventory    += s * q
 ```
 
+`round_half_up` rounds a half away from zero, so for a short, whose `positionCost` is negative, a half rounds to the larger magnitude.
+
 Transaction costs: `cash -= amount; txCostsPaid += amount`.
 
 ## Valuation
 
-Mark is **conservative**: long inventory is marked at the best bid, short at the best ask. If no book has ever been seen, inventory is valued at cost and `markPrice` is null. If the latest book is missing at valuation time, the last known book is used and `markMethod` says so.
+Mark is **conservative**: long inventory is marked at the best bid, short at the best ask. If no book has ever been seen, inventory is valued at cost and `markPrice` is null. If the latest book is missing at valuation time, the last known book is used and `markMethod` says so. When inventory is flat, inventory value and unrealized P&L are zero and `markPrice` reports the bid-ask midpoint rounded down to the price unit.
 
 ```
 inventoryValue = sign(inventory) * notional(mark, |inventory|)
