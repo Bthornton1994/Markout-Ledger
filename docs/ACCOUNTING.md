@@ -52,6 +52,8 @@ positionCost  = positionCost - removedCost + s * No
 inventory    += s * q
 ```
 
+`round_half_up` rounds a half away from zero, so for a short, whose `positionCost` is negative, a half rounds to the larger magnitude.
+
 Transaction costs: `cash -= amount; txCostsPaid += amount`.
 
 ## Valuation

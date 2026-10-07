@@ -43,6 +43,68 @@ describe('portfolio accounting', () => {
     checkIdentity(p, { bestBid: parsePrice('101'), bestAsk: parsePrice('101.5') });
   });
 
+  it('rounds the cost removed by a partial close half away from zero, and a full close removes the rest exactly', () => {
+    const long = new Portfolio(parseMoney('1000'));
+    long.applyFill('buy', parsePrice('100'), parseQty('1'), 0n);
+    long.applyFill('buy', parsePrice('100.000001'), parseQty('1'), 0n);
+    // removedCost = 200.000001 * 1/2 = 100.0000005, rounded to 100.000001
+    expect(long.applyFill('sell', parsePrice('101'), parseQty('1'), 0n).realizedDelta).toBe(parseMoney('0.999999'));
+    expect(long.positionCost).toBe(parseMoney('100'));
+    long.applyFill('sell', parsePrice('101'), parseQty('1'), 0n);
+    expect(long.positionCost).toBe(0n);
+    expect(long.grossRealized).toBe(parseMoney('1.999999')); // 202 - 200.000001: the split rounding cancels
+
+    const short = new Portfolio(parseMoney('1000'));
+    short.applyFill('sell', parsePrice('100'), parseQty('1'), 0n);
+    short.applyFill('sell', parsePrice('100.000001'), parseQty('1'), 0n);
+    // removedCost = -200.000001 * 1/2 = -100.0000005, rounded to -100.000001
+    expect(short.applyFill('buy', parsePrice('99'), parseQty('1'), 0n).realizedDelta).toBe(parseMoney('1.000001'));
+    expect(short.positionCost).toBe(-parseMoney('100'));
+  });
+
+  it('counts fills, per-side quantity and notional, and the largest absolute inventory after any fill', () => {
+    const p = new Portfolio(parseMoney('1000'));
+    p.applyFill('buy', parsePrice('101'), parseQty('0.5'), 0n);
+    p.applyFill('buy', parsePrice('100'), parseQty('0.5'), 0n);
+    p.applyFill('sell', parsePrice('102'), parseQty('3'), 0n);
+    expect(p.fillCount).toBe(3);
+    expect(p.buyQty).toBe(parseQty('1'));
+    expect(p.sellQty).toBe(parseQty('3'));
+    expect(p.buyNotional).toBe(parseMoney('100.5'));
+    expect(p.sellNotional).toBe(parseMoney('306'));
+    expect(p.maxAbsInventory).toBe(parseQty('2')); // reached by the flip, after the fill
+  });
+
+  it('rejects invalid inputs before changing any state', () => {
+    expect(() => new Portfolio(-1n)).toThrow(RangeError);
+    const p = new Portfolio(parseMoney('1000'));
+    p.applyFill('buy', parsePrice('100'), parseQty('1'), parseMoney('0.02'));
+    p.applyTxCost(parseMoney('0.005'));
+    const state = () => ({
+      cash: p.cash,
+      inventory: p.inventory,
+      positionCost: p.positionCost,
+      grossRealized: p.grossRealized,
+      feesPaid: p.feesPaid,
+      txCostsPaid: p.txCostsPaid,
+      fillCount: p.fillCount,
+      buyQty: p.buyQty,
+      sellQty: p.sellQty,
+    });
+    const before = state();
+    const invalid: Array<[string, () => unknown]> = [
+      ['zero qty', () => p.applyFill('sell', parsePrice('100'), 0n, 0n)],
+      ['negative qty', () => p.applyFill('sell', parsePrice('100'), -1n, 0n)],
+      ['zero price', () => p.applyFill('sell', 0n, parseQty('1'), 0n)],
+      ['negative fee (rebates are not modelled)', () => p.applyFill('sell', parsePrice('100'), parseQty('1'), -1n)],
+      ['negative tx cost', () => p.applyTxCost(-1n)],
+    ];
+    for (const [name, call] of invalid) {
+      expect(call, name).toThrow(RangeError);
+      expect(state(), name).toEqual(before);
+    }
+  });
+
   it('keeps the net P&L identity exact over random fill sequences', () => {
     const rng = mulberry32(1234);
     for (let trial = 0; trial < 50; trial++) {
