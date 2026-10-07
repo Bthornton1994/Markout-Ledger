@@ -86,7 +86,52 @@ describe('portfolio accounting', () => {
     p.applyFill('buy', parsePrice('1'), parseQty('1'), 0n);
     const v = p.valuation(null);
     expect(v.markPrice).toBeNull();
+    expect(v.markMethod).toBe('no_book_seen:inventory_at_cost');
+    expect(v.inventoryValue).toBe(p.positionCost);
     expect(v.unrealized).toBe(0n);
     expect(v.netPnl).toBe(0n);
+
+    const s = new Portfolio(parseMoney('1000'));
+    s.applyFill('sell', parsePrice('100'), parseQty('2'), 0n);
+    const vs = s.valuation(null);
+    expect(vs.markMethod).toBe('no_book_seen:inventory_at_cost');
+    expect(vs.inventoryValue).toBe(-parseMoney('200'));
+    expect(vs.unrealized).toBe(0n);
+    checkIdentity(s, null);
+  });
+
+  it('values with the last known book, and says so, when the latest book is missing', () => {
+    const p = new Portfolio(parseMoney('1000'));
+    p.applyFill('buy', parsePrice('100'), parseQty('2'), 0n);
+    p.valuation({ bestBid: parsePrice('98'), bestAsk: parsePrice('99') });
+    const book = { bestBid: parsePrice('101'), bestAsk: parsePrice('102') };
+    const live = p.valuation(book);
+    const stale = p.valuation(null);
+    expect(live.markMethod).toBe('conservative:long@bid,short@ask');
+    expect(stale.markMethod).toBe('conservative:long@bid,short@ask(last_known_book)');
+    expect({ ...stale, markMethod: '' }).toEqual({ ...live, markMethod: '' });
+    expect(stale.markPrice).toBe(parsePrice('101')); // the newest book, long at its bid
+    expect(stale.unrealized).toBe(parseMoney('2'));
+
+    // A fill after the last book flips the side; the stale book still marks short at its ask.
+    p.applyFill('sell', parsePrice('101'), parseQty('3'), 0n);
+    const flipped = p.valuation(null);
+    expect(flipped.markMethod).toBe('conservative:long@bid,short@ask(last_known_book)');
+    expect(flipped.markPrice).toBe(parsePrice('102'));
+    expect(flipped.inventoryValue).toBe(-parseMoney('102'));
+    checkIdentity(p, null);
+  });
+
+  it('values flat inventory at zero and reports the midpoint rounded down as the mark', () => {
+    const p = new Portfolio(parseMoney('1000'));
+    p.applyFill('buy', parsePrice('100'), parseQty('1'), 0n);
+    p.applyFill('sell', parsePrice('100.5'), parseQty('1'), 0n);
+    const v = p.valuation({ bestBid: 100_000_000n, bestAsk: 100_000_003n });
+    expect(v.inventory).toBe(0n);
+    expect(v.markPrice).toBe(100_000_001n); // (bid + ask) / 2 = 100.0000015, rounded down
+    expect(v.inventoryValue).toBe(0n);
+    expect(v.unrealized).toBe(0n);
+    expect(v.netPnl).toBe(parseMoney('0.5'));
+    checkIdentity(p, null);
   });
 });
